@@ -1,0 +1,56 @@
+name: WuWa intelligence feed
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: wuwa-feed
+  cancel-in-progress: true
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install pipeline dependencies
+        run: pip install -r data-pipeline/requirements.txt
+
+      - name: Build structured intelligence feed
+        run: python data-pipeline/aggregator.py
+
+      - name: Commit feed snapshot
+        run: |
+          git config user.name 'WuWa Tracker Bot'
+          git config user.email 'actions@users.noreply.github.com'
+          git add data-pipeline/feed.json
+          git diff --cached --quiet || git commit -m 'chore: update WuWa intelligence feed'
+          git push
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload feed to Pages
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: ./data-pipeline
+
+      - name: Deploy Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

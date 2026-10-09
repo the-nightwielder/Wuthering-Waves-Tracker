@@ -1,4 +1,4 @@
-name: WuWa intelligence feed
+name: WuWa Intelligence Feed
 
 on:
   schedule:
@@ -34,14 +34,6 @@ jobs:
 
       - name: Build structured intelligence feed
         run: python data-pipeline/aggregator.py
-
-      - name: Commit feed snapshot
-        run: |
-          git config user.name 'WuWa Tracker Bot'
-          git config user.email 'actions@users.noreply.github.com'
-          git add data-pipeline/feed.json
-          git diff --cached --quiet || git commit -m 'chore: update WuWa intelligence feed'
-          git push
 
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v5

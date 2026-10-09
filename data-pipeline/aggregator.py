@@ -1,0 +1,272 @@
+#!/usr/bin/env python3
+"""WuWa Tracker v1.3 free structured intelligence pipeline.
+
+No paid X API is required. X discovery uses public pages indexed by Google News RSS,
+while Reddit's public RSS feed is used for the leak community. All extracted claims are
+source-attributed and confidence-scored; leaks never become official automatically.
+"""
+import hashlib, html, json, os, re
+from collections import defaultdict
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+from pathlib import Path
+from urllib.parse import quote_plus, urljoin
+
+import feedparser
+import requests
+from bs4 import BeautifulSoup
+
+ROOT = Path(__file__).resolve().parent
+SOURCES = json.loads((ROOT / "sources.json").read_text())['sources']
+OUT = ROOT / "feed.json"
+UA = "WuWaTrackerDataBot/1.3 (+https://github.com/)"
+TIMEOUT = 20
+session = requests.Session()
+session.headers.update({"User-Agent": UA, "Accept-Language": "en-US,en;q=0.9"})
+
+WUWA_TERMS = re.compile(r"wuthering\s+waves|wuwa|resonator|astrite|lunite|convene|tower of adversity|endstate matrix|whimpering wastes|banner|tacet field|phantom", re.I)
+LEAK_TERMS = re.compile(r"\b(leak|leaks|leaked|beta|datamine|datamined|test client|stc|subject to change|rumou?r|unconfirmed|sus|drip marketing leak)\b", re.I)
+OFFICIAL_TERMS = re.compile(r"official|version|maintenance|special program|special report|resonator reveal|profile|update notice|preview|event notice", re.I)
+VERSION_RE = re.compile(r"\b(?:version|ver\.?|v)\s*(\d+\.\d+)\b", re.I)
+DATE_RE = re.compile(r"\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+([0-3]?\d)(?:st|nd|rd|th)?,?\s+(20\d{2})\b", re.I)
+DATE_RE_DMY = re.compile(r"\b([0-3]?\d)[/-](1[0-2]|0?[1-9])[/-](20\d{2})\b")
+TIME_RE = re.compile(r"\b(\d{1,2})(?::(\d{2}))?\s*(AM|PM)?\s*(?:UTC)?\s*([+-]\d{1,2})?\b", re.I)
+PHASE_RE = re.compile(r"\bphase\s*([12])\b", re.I)
+BANNER_TERMS = re.compile(r"banner|convene|rerun|rate[- ]up|featured", re.I)
+RESONATOR_TERMS = re.compile(r"resonator|5-star|4-star|\bcharacter\b", re.I)
+ELEMENTS = ["Aero", "Fusion", "Glacio", "Electro", "Havoc", "Spectro"]
+WEAPONS = ["Sword", "Broadblade", "Pistols", "Gauntlets", "Rectifier"]
+
+
+def clean_text(value):
+    if not value:
+        return ""
+    return re.sub(r"\s+", " ", BeautifulSoup(html.unescape(str(value)), "html.parser").get_text(" ")).strip()
+
+
+def parse_date(entry):
+    for key in ("published", "updated", "created"):
+        value = entry.get(key)
+        if value:
+            try:
+                return parsedate_to_datetime(value).astimezone(timezone.utc).isoformat()
+            except Exception:
+                pass
+        parsed = entry.get(key + "_parsed")
+        if parsed:
+            try:
+                return datetime(*parsed[:6], tzinfo=timezone.utc).isoformat()
+            except Exception:
+                pass
+    return datetime.now(timezone.utc).isoformat()
+
+
+def status_for(source, title, summary):
+    text = f"{title} {summary}"
+    if source['category'] in ('leak-community', 'social') or LEAK_TERMS.search(text):
+        return "LEAK", 0.52
+    if source['category'] == 'official':
+        return "OFFICIAL", 0.98
+    return "COMMUNITY", 0.68
+
+
+def make_item(source, title, url, summary="", published=None):
+    title, summary = clean_text(title), clean_text(summary)
+    if not title or not url or not WUWA_TERMS.search(f"{title} {summary}"):
+        return None
+    status, confidence = status_for(source, title, summary)
+    return {
+        "id": hashlib.sha256(url.encode()).hexdigest()[:20],
+        "title": title[:240], "url": url, "summary": summary[:1200],
+        "publishedAt": published or datetime.now(timezone.utc).isoformat(),
+        "sourceId": source['id'], "sourceCategory": source['category'],
+        "status": status, "confidence": confidence, "priority": source.get('priority', 50)
+    }
+
+
+def google_news(source):
+    url = "https://news.google.com/rss/search?q=" + quote_plus(source['query']) + "&hl=en-US&gl=US&ceid=US:en"
+    r = session.get(url, timeout=TIMEOUT); r.raise_for_status()
+    feed = feedparser.parse(r.content)
+    for e in feed.entries[:60]:
+        yield make_item(source, e.get('title'), e.get('link'), e.get('summary'), parse_date(e))
+
+
+def rss(source):
+    r = session.get(source['url'], timeout=TIMEOUT); r.raise_for_status()
+    feed = feedparser.parse(r.content)
+    for e in feed.entries[:60]:
+        yield make_item(source, e.get('title'), e.get('link'), e.get('summary'), parse_date(e))
+
+
+def html_page(source):
+    r = session.get(source['url'], timeout=TIMEOUT); r.raise_for_status()
+    soup = BeautifulSoup(r.text, 'html.parser'); seen = set()
+    for a in soup.find_all('a', href=True):
+        title = clean_text(a.get_text(' ', strip=True)); href = urljoin(r.url, a['href'])
+        if not title or href in seen or len(title) < 8:
+            continue
+        seen.add(href)
+        item = make_item(source, title, href)
+        if item:
+            yield item
+
+
+def iso_utc(year, month, day, hour=0, minute=0):
+    try:
+        return datetime(year, month, day, hour, minute, tzinfo=timezone.utc).isoformat().replace('+00:00', 'Z')
+    except ValueError:
+        return None
+
+
+def date_mentions(text):
+    out = []
+    months = {m.lower(): i for i, m in enumerate(__import__('calendar').month_name) if m}
+    for m in DATE_RE.finditer(text):
+        month_word = m.group(0).split()[0].lower().rstrip(',')
+        month = next((v for k, v in months.items() if k.startswith(month_word[:3])), None)
+        if month:
+            value = iso_utc(int(m.group(2)), month, int(m.group(1)))
+            if value: out.append((m.start(), m.end(), value, m.group(0)))
+    for m in DATE_RE_DMY.finditer(text):
+        value = iso_utc(int(m.group(3)), int(m.group(2)), int(m.group(1)))
+        if value: out.append((m.start(), m.end(), value, m.group(0)))
+    return sorted(out)
+
+
+def context(text, start, end, radius=180):
+    return text[max(0, start-radius):min(len(text), end+radius)]
+
+
+def claim_kind(title, summary):
+    text = f"{title} {summary}"
+    if BANNER_TERMS.search(text): return "banner"
+    if VERSION_RE.search(text): return "version"
+    if re.search(r"tower of adversity|endstate matrix|whimpering wastes", text, re.I): return "endgame"
+    if RESONATOR_TERMS.search(text): return "resonator"
+    return "event"
+
+
+def extract_entities(items):
+    versions, banners, resonators, events = {}, {}, {}, {}
+    for item in items:
+        text = f"{item['title']} — {item['summary']}"
+        kind = claim_kind(item['title'], item['summary'])
+        dates = date_mentions(text)
+        vm = VERSION_RE.search(text)
+        phase = PHASE_RE.search(text)
+        version = vm.group(1) if vm else None
+        evidence = {"sourceId": item['sourceId'], "url": item['url'], "status": item['status'], "confidence": item['confidence'], "publishedAt": item['publishedAt']}
+
+        if version:
+            key = version
+            rec = versions.setdefault(key, {"id": f"version-{version}", "version": version, "status": item['status'], "confidence": item['confidence'], "sources": [], "claims": []})
+            rec['sources'].append(evidence)
+            rec['claims'].append(item['title'])
+            if item['status'] == 'OFFICIAL': rec['status'] = 'OFFICIAL'; rec['confidence'] = max(rec['confidence'], 0.98)
+
+        if kind == 'banner':
+            bkey = re.sub(r"[^a-z0-9]+", "-", item['title'].lower()).strip('-')[:90]
+            rec = banners.setdefault(bkey, {"id": f"banner-{hashlib.sha1(bkey.encode()).hexdigest()[:12]}", "title": item['title'], "version": version, "phase": int(phase.group(1)) if phase else None, "startAt": None, "endAt": None, "status": item['status'], "confidence": item['confidence'], "sources": [], "claims": []})
+            rec['sources'].append(evidence); rec['claims'].append(item['title'])
+            if dates:
+                rec['startAt'] = rec['startAt'] or dates[0][2]
+                if len(dates) > 1: rec['endAt'] = dates[-1][2]
+            if item['status'] == 'OFFICIAL': rec['status'] = 'OFFICIAL'; rec['confidence'] = max(rec['confidence'], 0.98)
+
+        # Conservative resonator extraction: only use proper-name-like tokens from
+        # phrases around "Resonator"/"5-star" and never claim a leak is confirmed.
+        if RESONATOR_TERMS.search(text):
+            patterns = [r"(?:new|upcoming|leaked|rumored|featured)\s+(?:5[- ]star|4[- ]star)?\s*(?:resonator|character)?\s*[:\-]?\s*([A-Z][A-Za-z]{2,18})",
+                        r"\b([A-Z][A-Za-z]{2,18})\s+(?:resonator|banner|rerun)\b"]
+            for pat in patterns:
+                m = re.search(pat, text)
+                if not m: continue
+                name = m.group(1)
+                if name.lower() in {'wuthering','waves','resonator','character','version','banner','phase'}: continue
+                key = name.lower()
+                rec = resonators.setdefault(key, {"id": f"resonator-{hashlib.sha1(key.encode()).hexdigest()[:12]}", "name": name, "version": version, "phase": int(phase.group(1)) if phase else None, "element": next((e for e in ELEMENTS if re.search(e, context(text,m.start(),m.end()), re.I)), None), "weapon": next((w for w in WEAPONS if re.search(w, context(text,m.start(),m.end()), re.I)), None), "status": item['status'], "confidence": item['confidence'], "sources": [], "claims": []})
+                rec['sources'].append(evidence); rec['claims'].append(item['title'])
+                if item['status'] == 'OFFICIAL': rec['status'] = 'OFFICIAL'; rec['confidence'] = max(rec['confidence'], 0.98)
+                break
+
+        if dates and kind in ('event','endgame'):
+            key = hashlib.sha1((item['url'] + dates[0][2]).encode()).hexdigest()[:16]
+            rec = events.setdefault(key, {"id": f"event-{key}", "title": item['title'], "type": 'Endgame' if kind == 'endgame' else 'Event', "version": version, "startAt": dates[0][2], "endAt": dates[-1][2] if len(dates)>1 else None, "status": item['status'], "confidence": item['confidence'], "sourceUrl": item['url'], "sources": [], "claims": []})
+            rec['sources'].append(evidence); rec['claims'].append(item['title'])
+
+    return list(versions.values()), list(banners.values()), list(resonators.values()), list(events.values())
+
+
+def merge_by_entity(records):
+    for r in records:
+        # Evidence from multiple independent sources increases confidence, but never
+        # above 0.98 unless an official source is present.
+        unique_sources = {s['sourceId'] for s in r.get('sources', [])}
+        if r.get('status') != 'OFFICIAL' and len(unique_sources) >= 3:
+            r['confidence'] = min(0.90, r['confidence'] + 0.10)
+        elif r.get('status') != 'OFFICIAL' and len(unique_sources) >= 2:
+            r['confidence'] = min(0.82, r['confidence'] + 0.06)
+        r['sources'] = list({s['url']: s for s in r.get('sources', [])}.values())[:8]
+        r['sourceUrls'] = [s['url'] for s in r['sources']]
+        r['claims'] = list(dict.fromkeys(r.get('claims', [])))[:8]
+    return records
+
+
+def main():
+    items, errors = [], []
+    for source in SOURCES:
+        try:
+            fn = {'google_news': google_news, 'rss': rss, 'html': html_page}[source['kind']]
+            for item in fn(source):
+                if item: items.append(item)
+        except Exception as exc:
+            errors.append({"sourceId": source['id'], "error": str(exc)[:300]})
+
+    # Deduplicate URLs first, then near-identical titles.
+    by_url = {}
+    for item in items:
+        old = by_url.get(item['url'])
+        if old is None or (item['priority'], item['publishedAt']) > (old['priority'], old['publishedAt']):
+            by_url[item['url']] = item
+    by_title = {}
+    for item in sorted(by_url.values(), key=lambda z: (z['priority'], z['publishedAt']), reverse=True):
+        key = re.sub(r"[^a-z0-9]", "", item['title'].lower())[:140]
+        by_title.setdefault(key, item)
+    final = sorted(by_title.values(), key=lambda z: z['publishedAt'], reverse=True)[:300]
+
+    versions, banners, resonators, events = extract_entities(final)
+    versions, banners, resonators, events = [merge_by_entity(x) for x in (versions, banners, resonators, events)]
+    versions.sort(key=lambda x: tuple(map(int, x['version'].split('.'))), reverse=True)
+
+    payload = {
+        "schemaVersion": 3,
+        "generatedAt": datetime.now(timezone.utc).isoformat(),
+        "refreshSeconds": 1800,
+        "latestVersion": versions[0]['version'] if versions else None,
+        "news": final,
+        "versions": versions[:30],
+        "banners": banners[:80],
+        # Keep the complete evidence-bearing collection and also expose convenient
+        # lifecycle buckets for clients that want a direct active/upcoming view.
+        "activeBanners": [b for b in banners if b.get("startAt") and b.get("endAt") and b["startAt"] <= datetime.now(timezone.utc).isoformat() <= b["endAt"]][:40],
+        "upcomingBanners": [b for b in banners if b.get("startAt") and b["startAt"] > datetime.now(timezone.utc).isoformat()][:40],
+        "resonators": resonators[:100],
+        "upcomingResonators": [r for r in resonators if r.get("version") or r.get("phase")][:60],
+        "events": events[:120],
+        "sourceHealth": errors,
+        "policy": {
+            "officialIsAuthoritative": True,
+            "leaksAreUnconfirmed": True,
+            "multiSourceRaisesConfidenceButDoesNotConfirmLeaks": True,
+            "inGameTimerIsFinalAuthority": True,
+            "xApiRequired": False,
+            "freeXStrategy": "public X pages indexed by Google News RSS; no paid X API token"
+        }
+    }
+    OUT.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')
+    print(f"wrote {len(final)} news; {len(versions)} versions; {len(banners)} banners; {len(resonators)} resonators; {len(events)} events; {len(errors)} source errors")
+
+
+if __name__ == '__main__':
+    main()

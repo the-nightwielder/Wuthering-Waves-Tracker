@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 3,
+  "generatedAt": null,
+  "refreshSeconds": 1800,
+  "latestVersion": null,
+  "news": [],
+  "versions": [],
+  "banners": [],
+  "activeBanners": [],
+  "upcomingBanners": [],
+  "resonators": [],
+  "upcomingResonators": [],
+  "events": [],
+  "sourceHealth": [],
+  "policy": {
+    "officialIsAuthoritative": true,
+    "leaksAreUnconfirmed": true,
+    "multiSourceRaisesConfidenceButDoesNotConfirmLeaks": true,
+    "inGameTimerIsFinalAuthority": true,
+    "xApiRequired": false,
+    "freeXStrategy": "public X pages indexed by Google News RSS; no paid X API token"
+  }
+}

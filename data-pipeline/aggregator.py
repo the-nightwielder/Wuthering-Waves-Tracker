@@ -25,6 +25,8 @@ session = requests.Session()
 session.headers.update({"User-Agent": UA, "Accept-Language": "en-US,en;q=0.9"})
 
 WUWA_TERMS = re.compile(r"wuthering\s+waves|wuwa|resonator|astrite|lunite|convene|tower of adversity|endstate matrix|whimpering wastes|banner|tacet field|phantom", re.I)
+GAME_CONTEXT = re.compile(r"wuthering\s+waves|\bwuwa\b", re.I)
+REDDIT_TITLE_CONTEXT = re.compile(r"wuthering\s+waves|\bwuwa\b|resonator|banner|convene|\bversion\s*\d|\bv\d+\.\d+", re.I)
 LEAK_TERMS = re.compile(r"\b(leak|leaks|leaked|beta|datamine|datamined|test client|stc|subject to change|rumou?r|unconfirmed|sus|drip marketing leak)\b", re.I)
 OFFICIAL_TERMS = re.compile(r"official|version|maintenance|special program|special report|resonator reveal|profile|update notice|preview|event notice", re.I)
 VERSION_RE = re.compile(r"\b(?:version|ver\.?|v)\s*(\d+\.\d+)\b", re.I)
@@ -63,23 +65,38 @@ def parse_date(entry):
 
 def status_for(source, title, summary):
     text = f"{title} {summary}"
-    if source['category'] in ('leak-community', 'social') or LEAK_TERMS.search(text):
-        return "LEAK", 0.52
     if source['category'] == 'official':
         return "OFFICIAL", 0.98
+    if source['category'] == 'leak-community' or LEAK_TERMS.search(text):
+        return "LEAK", 0.52
     return "COMMUNITY", 0.68
 
 
-def make_item(source, title, url, summary="", published=None):
+def make_item(source, title, url, summary="", published=None, publisher=""):
     title, summary = clean_text(title), clean_text(summary)
     if not title or not url or not WUWA_TERMS.search(f"{title} {summary}"):
         return None
+    if not GAME_CONTEXT.search(f"{title} {summary}"):
+        return None
+    if source['kind'] == 'rss' and not REDDIT_TITLE_CONTEXT.search(title):
+        return None
+    if 'megathread' in title.lower() and not REDDIT_TITLE_CONTEXT.search(title.replace('megathread', '')):
+        return None
     status, confidence = status_for(source, title, summary)
+    if source['id'].startswith('x-'):
+        source_type = 'X · indexed by Google News'
+    elif source['kind'] == 'rss':
+        source_type = 'Reddit'
+    elif source['category'] == 'official':
+        source_type = 'Official website'
+    else:
+        source_type = 'Website'
     return {
         "id": hashlib.sha256(url.encode()).hexdigest()[:20],
         "title": title[:240], "url": url, "summary": summary[:1200],
         "publishedAt": published or datetime.now(timezone.utc).isoformat(),
         "sourceId": source['id'], "sourceCategory": source['category'],
+        "sourceType": source_type, "sourceName": clean_text(publisher)[:100] or source['id'],
         "status": status, "confidence": confidence, "priority": source.get('priority', 50)
     }
 
@@ -89,7 +106,9 @@ def google_news(source):
     r = session.get(url, timeout=TIMEOUT); r.raise_for_status()
     feed = feedparser.parse(r.content)
     for e in feed.entries[:60]:
-        yield make_item(source, e.get('title'), e.get('link'), e.get('summary'), parse_date(e))
+        source_info = e.get('source') or {}
+        publisher = source_info.get('title', '') if isinstance(source_info, dict) else ''
+        yield make_item(source, e.get('title'), e.get('link'), e.get('summary'), parse_date(e), publisher)
 
 
 def rss(source):
@@ -156,7 +175,7 @@ def extract_entities(items):
         vm = VERSION_RE.search(text)
         phase = PHASE_RE.search(text)
         version = vm.group(1) if vm else None
-        evidence = {"sourceId": item['sourceId'], "url": item['url'], "status": item['status'], "confidence": item['confidence'], "publishedAt": item['publishedAt']}
+        evidence = {"sourceId": item['sourceId'], "sourceType": item.get('sourceType', 'Website'), "sourceName": item.get('sourceName', item['sourceId']), "url": item['url'], "status": item['status'], "confidence": item['confidence'], "publishedAt": item['publishedAt']}
 
         if version:
             key = version

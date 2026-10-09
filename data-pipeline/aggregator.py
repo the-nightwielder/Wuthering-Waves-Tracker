@@ -278,6 +278,21 @@ def banner_snapshot(source):
     url = r.url
     if source.get("snapshotType") == "wuwabuild":
         version = VERSION_RE.search(text)
+        resonator_art, weapon_art = [], []
+        labels = [clean_text(node.get("alt", "") or node.get("title", "") or node.get_text(" ", strip=True)) for node in soup.find_all(["img", "a"]) ]
+        for label in labels:
+            if re.search(r"\bResonator\b", label, re.I):
+                candidate = re.sub(r"^.*?\bResonator\s+", "", label, flags=re.I).strip()
+                if candidate:
+                    resonator_art.append(candidate.split()[-1].strip(" -–:"))
+            if re.search(r"\bWeapon\b", label, re.I):
+                candidate = re.sub(r"^.*?\bWeapon(?:\s+Absolute\s+Pulsation:)?\s*", "", label, flags=re.I).strip(" .:-")
+                parts = candidate.split()
+                if len(parts) >= 2 and len(parts) % 2 == 0 and " ".join(parts[:len(parts)//2]).lower() == " ".join(parts[len(parts)//2:]).lower():
+                    candidate = " ".join(parts[:len(parts)//2])
+                if candidate:
+                    weapon_art.append(candidate)
+        art_weapon_map = dict(zip(resonator_art, weapon_art))
         output = []
         for anchor in soup.find_all("a"):
             card = clean_text(anchor.get_text(" ", strip=True))
@@ -306,7 +321,9 @@ def banner_snapshot(source):
                 start = datetime(start_date.year, start_date.month, start_date.day, tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
                 end = datetime(end_date.year, end_date.month, end_date.day, 23, 59, 59, tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
             resonators = [name.strip() for name in names.split(",") if name.strip()]
-            weapons = [part.strip() for part in (weapon or "").split(",") if part.strip()]
+            weapons = [art_weapon_map[name] for name in resonators if name in art_weapon_map]
+            weapons += [part.strip() for part in (weapon or "").split(",") if part.strip()]
+            weapons = list(dict.fromkeys(weapons))
             output.append({
                 "title": ", ".join(resonators), "version": vm.group(1), "phase": int(pm.group(1)),
                 "startAt": start, "endAt": end, "weapon": ", ".join(weapons),

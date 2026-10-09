@@ -13,6 +13,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.clickable
@@ -26,6 +27,9 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.Alignment
@@ -193,8 +197,9 @@ private fun WuWaTrackerRoot() {
     val version=state.version.takeIf{it!="Unknown"}?:"3.7"
     val feed=state.feedItems.filter{it.relevant(version,now)}.sortedByDescending{runCatching{Instant.parse(it.publishedAt)}.getOrDefault(Instant.EPOCH)}
     val banners=state.banners.filter{it.relevant(version,now)}
-    val active=banners.filter{it.startAt!=null&&it.startAt<=now&&(it.endAt==null||it.endAt>now)}.sortedBy{it.phase}.distinctBy{it.title+it.phase}
-    val upcoming=banners.filter{it.startAt?.isAfter(now)==true}.sortedBy{it.startAt}.distinctBy{it.title+it.phase}
+    fun oneCardPerPhase(rows:List<BannerIntel>)=rows.groupBy{"${it.version.orEmpty()}|${it.phase ?: 0}"}.values.mapNotNull{phaseRows->phaseRows.maxByOrNull{(if(it.weaponClaim.isNullOrBlank())0 else 100+it.weaponClaim.length)+(it.weaponImages.size*10)+(it.resonatorImages.size*5)+(if(it.sourceLabel.contains("WuWaBuild",true))25 else 0)}}
+    val active=oneCardPerPhase(banners.filter{it.startAt!=null&&it.startAt<=now&&(it.endAt==null||it.endAt>now)}).sortedBy{it.phase}
+    val upcoming=oneCardPerPhase(banners.filter{it.startAt?.isAfter(now)==true}).sortedBy{it.startAt}
     ArtworkScreen(modifier,R.drawable.bg_intel){LazyColumn(Modifier.fillMaxSize().padding(horizontal=16.dp,vertical=12.dp),verticalArrangement=Arrangement.spacedBy(10.dp)){
         item{Text("Intelligence",style=MaterialTheme.typography.headlineMedium,fontWeight=FontWeight.Bold)}
         item{InfoCard("Public intelligence feed",if(syncing)"Refreshing…" else feed.size.toString()+" recent reports · "+banners.size+" relevant banner claims",listOf(syncMessage.takeIf{it.isNotBlank()},state.lastSync.takeIf{it.isNotBlank()}?.let{"Last sync: "+it}).filterNotNull().joinToString(" · ").ifBlank{"Updated from free public sources."})}
@@ -208,7 +213,7 @@ private fun WuWaTrackerRoot() {
         items(upcoming){b->BannerOverviewCard(b,false)}
         groups.forEach{g->
             val rows=feed.filter{it.status.equals(g.status,true)&&(g.status!="LEAK"||it.isFutureLeak(version))}.take(12)
-            val gb=banners.filter{it.status.equals(g.status,true)}.take(8)
+            val gb=banners.filter{it.status.equals(g.status,true)&&(g.status!="LEAK"||it.version?.let{v->compareVersion(v,version)>0}==true)}.take(8)
             val gr=state.resonators.filter{it.status.equals(g.status,true)&&if(g.status=="LEAK")it.version?.let{v->compareVersion(v,version)>0}==true else (it.version?.let{v->compareVersion(v,version)>=0}==true || feed.any{n->n.title.contains(it.name,true)||n.summary.contains(it.name,true)})}.take(8)
             val closed=g.status in state.collapsedSections
             item(key="section-"+g.status){SectionHeader(g,closed){onToggle(g.status)}}
@@ -222,26 +227,36 @@ private fun WuWaTrackerRoot() {
 }
 private data class IntelGroup(val title:String,val status:String,val emptyMessage:String)
 @Composable private fun SectionHeader(g:IntelGroup,closed:Boolean,toggle:()->Unit){Card(Modifier.fillMaxWidth().clickable(onClick=toggle),colors=CardDefaults.cardColors(containerColor=when(g.status){"OFFICIAL"->Color(0xFF263746);"LEAK"->Color(0xFF482D3C);else->Color(0xFF303044)})){Row(Modifier.fillMaxWidth().padding(horizontal=18.dp,vertical=12.dp),verticalAlignment=Alignment.CenterVertically){Column(Modifier.weight(1f)){Text(g.title,style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.Bold,color=Color.White);Text(if(closed)"Tap to expand" else g.status,style=MaterialTheme.typography.labelSmall,color=Color.LightGray)};ChevronControl(closed)}}}
-@Composable private fun ChevronControl(collapsed:Boolean){Box(Modifier.size(44.dp).clip(CircleShape).background(Color(0xFF51435F)),contentAlignment=Alignment.Center){Text(if(collapsed)"⌄" else "⌃",style=MaterialTheme.typography.headlineMedium,fontWeight=FontWeight.Bold,color=Color.White)}}
+@Composable private fun ChevronControl(collapsed:Boolean){Box(Modifier.size(48.dp).clip(CircleShape).background(Color(0xFF51435F)),contentAlignment=Alignment.Center){Canvas(Modifier.size(24.dp)){val path=Path().apply{if(collapsed){moveTo(size.width*.24f,size.height*.40f);quadraticTo(size.width*.50f,size.height*.68f,size.width*.76f,size.height*.40f)}else{moveTo(size.width*.24f,size.height*.60f);quadraticTo(size.width*.50f,size.height*.32f,size.width*.76f,size.height*.60f)}};drawPath(path,Color.White,style=Stroke(width=3.5.dp.toPx(),cap=StrokeCap.Round))}}}
 @Composable private fun BannerOverviewCard(b:BannerIntel,current:Boolean){
     var expanded by remember(b.title,current){mutableStateOf(false)}
-    val names=b.title.split(Regex("\\s*,\\s*|\\s+and\\s+" )).map{it.trim()}.filter{it.isNotBlank()}
-    val weapons=b.weaponClaim?.split(Regex("\\s*,\\s*|\\s+and\\s+"))?.map{it.trim()}?.filter{it.isNotBlank()}.orEmpty()
+    val names=b.title.split(Regex("\\s*,\\s*|\\s+and\\s+" )).map{it.trim()}.filter{it.isNotBlank()}.distinctBy{it.lowercase(Locale.ROOT)}.take(2)
+    val feedWeapons=b.weaponClaim?.split(Regex("\\s*,\\s*|\\s+and\\s+|\\s*;\\s*"))?.map{it.trim()}?.filter{it.isNotBlank()}?.distinctBy{it.lowercase(Locale.ROOT)}.orEmpty()
+    val timelineFallback=if(b.version=="3.7")mapOf("hsin" to "Blooming Jadehaven","chisa" to "Kumokiri","iuno" to "Moongazer’s Sigil","suoming" to "Unspoken Rue","lynae" to "Spectrum Blaster","lucilla" to "Freeze Frame")else emptyMap()
+    val mappedFallback=names.mapNotNull{timelineFallback[it.lowercase(Locale.ROOT)]}
+    val usedFallback=mappedFallback.any{fallback->feedWeapons.none{it.equals(fallback,true)}}
+    val weapons=(feedWeapons+mappedFallback).distinctBy{it.lowercase(Locale.ROOT)}.take(2)
     Card(Modifier.fillMaxWidth(),colors=CardDefaults.cardColors(containerColor=if(current)Color(0xFF292438) else Color(0xFF26323C))){Column(Modifier.padding(16.dp),verticalArrangement=Arrangement.spacedBy(9.dp)){
-        Row(Modifier.fillMaxWidth().clickable{expanded=!expanded},verticalAlignment=Alignment.CenterVertically){val lead=names.firstOrNull().orEmpty();val localPortrait=lead.contains("Hsin",true);val remote=b.resonatorImages[lead];if(remote!=null)RemoteArtwork(remote,lead) else if(localPortrait)Image(painterResource(R.drawable.hsin_portrait),lead,contentScale=ContentScale.Crop,modifier=Modifier.size(68.dp).clip(CircleShape));Column(Modifier.weight(1f).padding(start=if(remote!=null||localPortrait)12.dp else 0.dp)){Text(if(current)"ACTIVE BANNER" else "UPCOMING BANNER",style=MaterialTheme.typography.labelLarge,color=MaterialTheme.colorScheme.primary);Text(lead.ifBlank{b.title},style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.Bold);Text(listOfNotNull(b.version?.let{"Version $it"},b.phase?.let{"Phase $it"},b.startAt?.let{(if(current)"From " else "Starts ")+dateOnly(it)},b.endAt?.let{"Until "+dateOnly(it)}).joinToString(" · "),style=MaterialTheme.typography.bodySmall)};ChevronControl(!expanded)}
+        Row(Modifier.fillMaxWidth().clickable{expanded=!expanded},verticalAlignment=Alignment.CenterVertically){val lead=names.firstOrNull().orEmpty();val localPortrait=lead.contains("Hsin",true);if(!expanded){if(localPortrait)Image(painterResource(R.drawable.hsin_portrait),lead,contentScale=ContentScale.Crop,modifier=Modifier.size(68.dp).clip(CircleShape))else b.resonatorImages[lead]?.let{RemoteArtwork(it,lead)}?:ArtworkInitial(lead);Column(Modifier.weight(1f).padding(start=12.dp)){Text(if(current)"ACTIVE BANNER" else "UPCOMING BANNER",style=MaterialTheme.typography.labelLarge,color=MaterialTheme.colorScheme.primary);Text(lead.ifBlank{b.title},style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.Bold);Text(listOfNotNull(b.version?.let{"Version $it"},b.phase?.let{"Phase $it"},b.startAt?.let{(if(current)"From " else "Starts ")+dateOnly(it)},b.endAt?.let{"Until "+dateOnly(it)}).joinToString(" · "),style=MaterialTheme.typography.bodySmall)}}else{Column(Modifier.weight(1f)){Text(if(current)"ACTIVE BANNER DETAILS" else "UPCOMING BANNER DETAILS",style=MaterialTheme.typography.labelLarge,color=MaterialTheme.colorScheme.primary);Text(listOfNotNull(b.version?.let{"Version $it"},b.phase?.let{"Phase $it"},b.startAt?.let{dateOnly(it)},b.endAt?.let{"Until "+dateOnly(it)}).joinToString(" · "),style=MaterialTheme.typography.bodySmall)}};ChevronControl(!expanded)}
         if(expanded){
             Text("Resonators",style=MaterialTheme.typography.titleSmall,fontWeight=FontWeight.Bold)
             names.forEachIndexed{index,name->
-                Row(Modifier.fillMaxWidth().padding(vertical=5.dp),horizontalArrangement=Arrangement.spacedBy(12.dp),verticalAlignment=Alignment.CenterVertically){val image=b.resonatorImages[name];if(image!=null)RemoteArtwork(image,name) else if(name.contains("Hsin",true))Image(painterResource(R.drawable.hsin_portrait),"Hsin",contentScale=ContentScale.Crop,modifier=Modifier.size(68.dp).clip(CircleShape)) else Box(Modifier.size(68.dp).clip(CircleShape).background(Color(0xFF393441)),contentAlignment=Alignment.Center){Text(name.take(1).uppercase(),style=MaterialTheme.typography.headlineMedium,color=Color.White)};Column{Text("Resonator ${index+1} · $name",fontWeight=FontWeight.SemiBold);Text(listOfNotNull(b.version?.let{"Version $it"},b.phase?.let{"Phase $it"},b.startAt?.let{dateOnly(it)},b.endAt?.let{"until "+dateOnly(it)}).joinToString(" · ").ifBlank{"Dates not provided by source"},style=MaterialTheme.typography.bodySmall);Text(b.status+" · "+b.sourceLabel+" · Exact server time not listed by source",style=MaterialTheme.typography.labelSmall)}}
+                Row(Modifier.fillMaxWidth().padding(vertical=5.dp),horizontalArrangement=Arrangement.spacedBy(12.dp),verticalAlignment=Alignment.CenterVertically){if(name.contains("Hsin",true))Image(painterResource(R.drawable.hsin_portrait),"Hsin",contentScale=ContentScale.Crop,modifier=Modifier.size(68.dp).clip(CircleShape))else b.resonatorImages[name]?.let{RemoteArtwork(it,name)}?:ArtworkInitial(name);Column{Text(name,fontWeight=FontWeight.SemiBold);Text(listOfNotNull(b.phase?.let{"Phase $it"},b.startAt?.let{dateOnly(it)},b.endAt?.let{"until "+dateOnly(it)}).joinToString(" · ").ifBlank{"Dates not provided by source"},style=MaterialTheme.typography.bodySmall)}}
             }
             HorizontalDivider()
             Text("Weapons",style=MaterialTheme.typography.titleSmall,fontWeight=FontWeight.Bold)
-            if(weapons.isEmpty())Text("Weapon details are not available in the current feed yet.",style=MaterialTheme.typography.bodySmall,color=Color.LightGray) else weapons.forEachIndexed{index,name->Row(Modifier.fillMaxWidth().padding(vertical=5.dp),horizontalArrangement=Arrangement.spacedBy(12.dp),verticalAlignment=Alignment.CenterVertically){b.weaponImages[name]?.let{RemoteArtwork(it,name)};Column{Text("Weapon ${index+1} · $name",fontWeight=FontWeight.SemiBold);Text("${b.version?.let{"Version $it · "}.orEmpty()}${b.phase?.let{"Phase $it · "}.orEmpty()}${b.startAt?.let{dateOnly(it)}?:"Schedule date unavailable"}",style=MaterialTheme.typography.bodySmall)}}}
+            if(weapons.isEmpty())Text("Weapon names will appear after the updated schedule feed is published.",style=MaterialTheme.typography.bodySmall,color=Color.LightGray) else weapons.forEach{name->Row(Modifier.fillMaxWidth().padding(vertical=5.dp),horizontalArrangement=Arrangement.spacedBy(12.dp),verticalAlignment=Alignment.CenterVertically){b.weaponImages[name]?.let{RemoteArtwork(it,name)}?:ArtworkInitial(name);Column{Text(name,fontWeight=FontWeight.SemiBold);Text("${b.version?.let{"Version $it · "}.orEmpty()}${b.phase?.let{"Phase $it · "}.orEmpty()}${b.startAt?.let{dateOnly(it)}?:"Schedule date unavailable"}",style=MaterialTheme.typography.bodySmall)}}}
+            if(usedFallback)Text("Weapon pairings are community schedule references.",style=MaterialTheme.typography.labelSmall,color=Color.LightGray)
             Text("Verify exact server timing in-game.",style=MaterialTheme.typography.labelSmall,color=Color.LightGray)
         }
     }}
 }
-@Composable private fun RemoteArtwork(url:String,description:String){var image by remember(url){mutableStateOf<ImageBitmap?>(null)};LaunchedEffect(url){image=withContext(Dispatchers.IO){runCatching{require(url.startsWith("https://"));URL(url).openConnection().apply{connectTimeout=8000;readTimeout=8000}.getInputStream().use{BitmapFactory.decodeStream(it)?.asImageBitmap()}}.getOrNull()}};if(image!=null)Image(image!!,description,contentScale=ContentScale.Crop,modifier=Modifier.size(68.dp).clip(CircleShape))else Box(Modifier.size(68.dp).clip(CircleShape).background(Color(0xFF393441)),contentAlignment=Alignment.Center){Text(description.take(1).uppercase(),style=MaterialTheme.typography.headlineMedium,color=Color.White)}}
+@Composable private fun ArtworkInitial(name:String){Box(Modifier.size(68.dp).clip(CircleShape).background(Color(0xFF393441)),contentAlignment=Alignment.Center){Text(name.take(1).uppercase(),style=MaterialTheme.typography.headlineMedium,color=Color.White)}}
+private data class ArtworkFocus(val x:Float,val y:Float,val width:Float)
+// Add a per-character focal point only after checking that source artwork. Unknown future
+// characters keep their full image, avoiding accidental face crops.
+private val verifiedArtworkFocus=mapOf("chisa" to ArtworkFocus(.50f,.30f,.68f))
+@Composable private fun RemoteArtwork(url:String,description:String){val focus=verifiedArtworkFocus[description.trim().lowercase(Locale.ROOT)];var image by remember(url,focus){mutableStateOf<ImageBitmap?>(null)};LaunchedEffect(url,focus){image=withContext(Dispatchers.IO){runCatching{require(url.startsWith("https://"));URL(url).openConnection().apply{connectTimeout=8000;readTimeout=8000}.getInputStream().use{stream->BitmapFactory.decodeStream(stream)?.let{bitmap->if(focus==null)bitmap.asImageBitmap() else {val side=(minOf(bitmap.width,bitmap.height)*focus.width).toInt().coerceAtLeast(1);val centerX=(bitmap.width*focus.x).toInt();val centerY=(bitmap.height*focus.y).toInt();val left=(centerX-side/2).coerceIn(0,bitmap.width-side);val top=(centerY-side/2).coerceIn(0,bitmap.height-side);android.graphics.Bitmap.createBitmap(bitmap,left,top,side,side).asImageBitmap()}}}}.getOrNull()}};if(image!=null)Image(image!!,description,contentScale=if(focus==null)ContentScale.Fit else ContentScale.Crop,modifier=Modifier.size(68.dp).clip(CircleShape))else ArtworkInitial(description)}
 @Composable private fun SourceLinkCard(title:String,body:String,url:String){Card(Modifier.fillMaxWidth().clickable{openUrl(url)}){Column(Modifier.padding(16.dp),verticalArrangement=Arrangement.spacedBy(5.dp)){Text(title,fontWeight=FontWeight.SemiBold);Text(body,style=MaterialTheme.typography.bodySmall);Text("Open source ↗",color=MaterialTheme.colorScheme.primary)}}}
 private fun dateOnly(i:Instant)=DateTimeFormatter.ofPattern("MMM d, yyyy",Locale.getDefault()).withZone(ZoneOffset.UTC).format(i)
 private fun BannerIntel.relevant(version:String,now:Instant):Boolean = if(this.version!=null) compareVersion(this.version,version)>=0 else (endAt?.isAfter(now)==true || startAt?.isAfter(now)==true)
@@ -249,7 +264,7 @@ private fun FeedItem.isFutureLeak(currentVersion:String):Boolean {
     val text=title+" "+summary
     val versions=Regex("(?i)(?:version|ver\\.?|v)\\s*(\\d+\\.\\d+)").findAll(text).map{it.groupValues[1]}.toList()
     if(versions.any{compareVersion(it,currentVersion)>0})return true
-    return Regex("(?i)\\b(?:upcoming|next\\s+(?:version|patch)|future\\s+(?:version|resonator)|beta\\s+(?:for|of)\\s*v?\\d+\\.\\d+)\\b").containsMatchIn(text)
+    return false
 }
 private fun compareVersion(a:String,b:String):Int{val x=Regex("\\d+\\.\\d+").find(a)?.value?.split(".")?.map{it.toInt()}?:return 0;val y=Regex("\\d+\\.\\d+").find(b)?.value?.split(".")?.map{it.toInt()}?:return 0;for(i in 0 until maxOf(x.size,y.size)){val n=x.getOrElse(i){0}.compareTo(y.getOrElse(i){0});if(n!=0)return n};return 0}
 private fun FeedItem.relevant(version:String,now:Instant):Boolean{val mentions=Regex("(?i)(?:version|ver\\.?|v)\\s*(\\d+\\.\\d+)").findAll(title+" "+summary).map{it.groupValues[1]}.toList();if(mentions.any{compareVersion(it,version)<0}&&mentions.none{compareVersion(it,version)>=0})return false;val date=runCatching{Instant.parse(publishedAt)}.getOrNull()?:return mentions.any{compareVersion(it,version)>=0};return mentions.any{compareVersion(it,version)>=0}||Duration.between(date,now).abs()<=Duration.ofDays(60)}

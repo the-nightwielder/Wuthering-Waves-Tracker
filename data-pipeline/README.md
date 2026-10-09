@@ -16,12 +16,14 @@ If you later self-host an RSS bridge that legally exposes specific public X feed
 - WutheringWaves.gg
 - Game8
 - LDShop
+- WuWa Banners live schedule snapshot and GenGamer upcoming countdown snapshot
+- u7buy.com and LDShop leak discovery through Google News indexing
 - GamingOnPhone
 - Public X pages indexed by Google News
 - r/WutheringWavesLeaks RSS
 - r/WutheringWaves RSS
-- WuWa Banners
-- WuWa Countdown
+- Source title and type are retained so the app can identify Website, X, and Reddit reports.
+- Generic homepage navigation and unrelated Reddit megathreads are filtered out.
 
 ## Structured output
 

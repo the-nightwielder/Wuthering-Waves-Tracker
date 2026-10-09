@@ -29,7 +29,7 @@ GAME_CONTEXT = re.compile(r"wuthering\s+waves|\bwuwa\b", re.I)
 REDDIT_TITLE_CONTEXT = re.compile(r"wuthering\s+waves|\bwuwa\b|resonator|banner|convene|\bversion\s*\d|\bv\d+\.\d+", re.I)
 LEAK_TERMS = re.compile(r"\b(leak|leaks|leaked|beta|datamine|datamined|test client|stc|subject to change|rumou?r|unconfirmed|sus|drip marketing leak)\b", re.I)
 OFFICIAL_TERMS = re.compile(r"official|version|maintenance|special program|special report|resonator reveal|profile|update notice|preview|event notice", re.I)
-VERSION_RE = re.compile(r"\b(?:version|ver\.?|v)\s*(\d+\.\d+)\b", re.I)
+VERSION_RE = re.compile(r"\b(?:(?:version|ver\.?|v)\s*|wuthering\s+waves\s*)(\d+\.\d+)\b", re.I)
 DATE_RE = re.compile(r"\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+([0-3]?\d)(?:st|nd|rd|th)?,?\s+(20\d{2})\b", re.I)
 DATE_RE_DMY = re.compile(r"\b([0-3]?\d)[/-](1[0-2]|0?[1-9])[/-](20\d{2})\b")
 TIME_RE = re.compile(r"\b(\d{1,2})(?::(\d{2}))?\s*(AM|PM)?\s*(?:UTC)?\s*([+-]\d{1,2})?\b", re.I)
@@ -232,10 +232,75 @@ def merge_by_entity(records):
     return records
 
 
+
+def snapshot_date(value, end_of_day=False):
+    try:
+        day = datetime.strptime(value.strip(), "%B %d, %Y").replace(tzinfo=timezone.utc)
+        if end_of_day:
+            day = day.replace(hour=23, minute=59, second=59)
+        return day.isoformat().replace("+00:00", "Z")
+    except ValueError:
+        return None
+
+
+def banner_snapshot(source):
+    r = session.get(source["url"], timeout=TIMEOUT)
+    r.raise_for_status()
+    soup = BeautifulSoup(r.text, "html.parser")
+    text = clean_text(soup.get_text(" ", strip=True))
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    url = r.url
+    if source.get("snapshotType") == "current":
+        current = re.search(r"Current WuWa banner\s*:\s*([^\.]+?)\.\s*Banner", text, re.I)
+        version = VERSION_RE.search(text)
+        phase = PHASE_RE.search(text)
+        start = end = None
+        for row in soup.find_all("tr"):
+            cells = [clean_text(cell.get_text(" ", strip=True)) for cell in row.find_all(["td", "th"])]
+            if cells and "Live banner phase" in cells[0] and len(cells) > 2:
+                phase_match = PHASE_RE.search(" ".join(cells[:2]))
+                phase = phase_match or phase
+                dates = re.findall(r"(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+20\d{2}", cells[2], re.I)
+                if len(dates) >= 2:
+                    start = snapshot_date(dates[0])
+                    end = snapshot_date(dates[1], True)
+                break
+        title = clean_text(current.group(1)).rstrip(".") if current else ""
+        if not title:
+            return None
+        weapon_match = re.search(r"(?:featured|signature)\s+weapon(?:\s+banner)?\s*(?:is|:|—|-)\s*([A-Z][A-Za-z0-9'’ -]{2,40})", text, re.I)
+        weapon = clean_text(weapon_match.group(1)).rstrip(" .") if weapon_match else None
+        return {
+            "title": title, "version": version.group(1) if version else None,
+            "phase": int(phase.group(1)) if phase else None, "startAt": start, "endAt": end,
+            "weapon": weapon, "status": "COMMUNITY", "confidence": 0.85,
+            "sourceLabel": "WuWa Banners", "sourceUrls": [url], "snapshotAt": now
+        }
+    heading = next((clean_text(h.get_text(" ", strip=True)) for h in soup.find_all(["h1", "h2", "h3"]) if "countdown" in h.get_text(" ", strip=True).lower()), "")
+    match = re.search(r"([A-Z][A-Za-z]+(?:,\s*[A-Z][A-Za-z]+)*(?:,?\s+and\s+[A-Z][A-Za-z]+)?)\s+Banner Countdown", heading, re.I)
+    release = re.search(r"is set to release (?:alongside .+? )?on\s+([A-Z][a-z]+\s+\d{1,2},\s+20\d{2})", text, re.I)
+    title = clean_text(match.group(1)).replace(" and ", ", ") if match else ""
+    if not title:
+        return None
+    version = VERSION_RE.search(text)
+    phase_match = re.search(r"Phase\s*(?:II|2|I|1)", text, re.I)
+    phase = 2 if phase_match and phase_match.group(0).lower().endswith(("ii", "2")) else (1 if phase_match else None)
+    start = snapshot_date(release.group(1)) if release else None
+    return {
+        "title": title, "version": version.group(1) if version else None,
+        "phase": phase, "startAt": start, "endAt": None, "weapon": None,
+        "status": "COMMUNITY", "confidence": 0.78,
+        "sourceLabel": "GenGamer Countdown", "sourceUrls": [url], "snapshotAt": now
+    }
 def main():
-    items, errors = [], []
+    items, errors, snapshots = [], [], []
     for source in SOURCES:
         try:
+            if source['kind'] == 'banner_snapshot':
+                snapshot = banner_snapshot(source)
+                if snapshot:
+                    snapshots.append(snapshot)
+                continue
             fn = {'google_news': google_news, 'rss': rss, 'html': html_page}[source['kind']]
             for item in fn(source):
                 if item: items.append(item)
@@ -262,10 +327,11 @@ def main():
         "schemaVersion": 3,
         "generatedAt": datetime.now(timezone.utc).isoformat(),
         "refreshSeconds": 1800,
-        "latestVersion": versions[0]['version'] if versions else None,
+        "latestVersion": next((v['version'] for v in versions if v.get('status') == 'OFFICIAL'), versions[0]['version'] if versions else None),
         "news": final,
         "versions": versions[:30],
         "banners": banners[:80],
+        "scheduleSnapshots": snapshots,
         # Keep the complete evidence-bearing collection and also expose convenient
         # lifecycle buckets for clients that want a direct active/upcoming view.
         "activeBanners": [b for b in banners if b.get("startAt") and b.get("endAt") and b["startAt"] <= datetime.now(timezone.utc).isoformat() <= b["endAt"]][:40],

@@ -243,11 +243,37 @@ def snapshot_date(value, end_of_day=False):
         return None
 
 
+_FANDOM_IMAGE_CACHE = {}
+def fandom_image(name):
+    key = name.strip().lower()
+    if not key:
+        return None
+    if key in _FANDOM_IMAGE_CACHE:
+        return _FANDOM_IMAGE_CACHE[key]
+    image = None
+    try:
+        response = session.get("https://wutheringwaves.fandom.com/api.php", params={
+            "action": "query", "titles": name, "prop": "pageimages", "format": "json",
+            "pithumbsize": 640, "redirects": 1
+        }, timeout=TIMEOUT)
+        response.raise_for_status()
+        pages = response.json().get("query", {}).get("pages", {})
+        page = next(iter(pages.values()), {})
+        image = page.get("thumbnail", {}).get("source")
+        if image and not image.startswith("https://"):
+            image = None
+    except Exception:
+        pass
+    _FANDOM_IMAGE_CACHE[key] = image
+    return image
+
+
 def banner_snapshot(source):
     r = session.get(source["url"], timeout=TIMEOUT)
     r.raise_for_status()
     soup = BeautifulSoup(r.text, "html.parser")
-    text = clean_text(soup.get_text(" ", strip=True))
+    image_labels = " ".join(img.get("alt", "") for img in soup.find_all("img"))
+    text = clean_text(soup.get_text(" ", strip=True) + " " + image_labels)
     now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     url = r.url
     if source.get("snapshotType") == "current":
@@ -270,10 +296,13 @@ def banner_snapshot(source):
             return None
         weapon_match = re.search(r"(?:featured|signature)\s+weapon(?:\s+banner)?\s*(?:is|:|—|-)\s*([A-Z][A-Za-z0-9'’ -]{2,40})", text, re.I)
         weapon = clean_text(weapon_match.group(1)).rstrip(" .") if weapon_match else None
+        resonators = [name.strip() for name in re.split(r",|\band\b", title) if name.strip()]
         return {
             "title": title, "version": version.group(1) if version else None,
             "phase": int(phase.group(1)) if phase else None, "startAt": start, "endAt": end,
             "weapon": weapon, "status": "COMMUNITY", "confidence": 0.85,
+            "resonatorImages": {name: image for name in resonators if (image := fandom_image(name))},
+            "weaponImages": {weapon: image} if weapon and (image := fandom_image(weapon)) else {},
             "sourceLabel": "WuWa Banners", "sourceUrls": [url], "snapshotAt": now
         }
     heading = next((clean_text(h.get_text(" ", strip=True)) for h in soup.find_all(["h1", "h2", "h3"]) if "countdown" in h.get_text(" ", strip=True).lower()), "")
@@ -286,9 +315,14 @@ def banner_snapshot(source):
     phase_match = re.search(r"Phase\s*(?:II|2|I|1)", text, re.I)
     phase = 2 if phase_match and phase_match.group(0).lower().endswith(("ii", "2")) else (1 if phase_match else None)
     start = snapshot_date(release.group(1)) if release else None
+    resonators = [name.strip() for name in re.split(r",|\band\b", title) if name.strip()]
+    weapon_match = re.search(r"(?:featured|signature)\s+weapon(?:\s+banner)?\s*(?:is|:|—|-)\s*([A-Z][A-Za-z0-9'’ -]{2,40})", text, re.I)
+    weapon = clean_text(weapon_match.group(1)).rstrip(" .") if weapon_match else None
     return {
         "title": title, "version": version.group(1) if version else None,
-        "phase": phase, "startAt": start, "endAt": None, "weapon": None,
+        "phase": phase, "startAt": start, "endAt": None, "weapon": weapon,
+        "resonatorImages": {name: image for name in resonators if (image := fandom_image(name))},
+        "weaponImages": {weapon: image} if weapon and (image := fandom_image(weapon)) else {},
         "status": "COMMUNITY", "confidence": 0.78,
         "sourceLabel": "GenGamer Countdown", "sourceUrls": [url], "snapshotAt": now
     }

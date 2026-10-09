@@ -276,6 +276,48 @@ def banner_snapshot(source):
     text = clean_text(soup.get_text(" ", strip=True) + " " + image_labels)
     now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     url = r.url
+    if source.get("snapshotType") == "wuwabuild":
+        version = VERSION_RE.search(text)
+        output = []
+        for anchor in soup.find_all("a"):
+            card = clean_text(anchor.get_text(" ", strip=True))
+            vm = VERSION_RE.search(card)
+            pm = re.search(r"Phase\s*([12])", card, re.I)
+            if not vm or not pm or not re.search(r"Featured weapons?:", card, re.I):
+                continue
+            # Character names appear immediately after the rarity marker.
+            names_match = re.search(r"5\s*★\s*(.+?)\s+(?:First|Second|Third)\s+limited banner", card, re.I)
+            if not names_match:
+                continue
+            names = re.sub(r"\s*\+\s*", ", ", clean_text(names_match.group(1))).replace(" and ", ", ")
+            names = re.sub(r"\s*,\s*", ", ", names).strip(" ,")
+            weapon_match = re.search(r"Featured weapons?:\s*(.+?)\.(?:Ends|Launch|$)", card, re.I)
+            weapon = clean_text(weapon_match.group(1)).rstrip(" .") if weapon_match else None
+            date_match = re.search(r"\b(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\s*(\d{1,2})\s*(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\s*(\d{1,2})\b", card, re.I)
+            start = end = None
+            if date_match:
+                from datetime import date as calendar_date
+                months = {m.upper(): i for i, m in enumerate(("JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"), 1)}
+                year = datetime.now(timezone.utc).year
+                sm, sd, em, ed = date_match.groups()
+                start_date = calendar_date(year, months[sm.upper()], int(sd))
+                end_year = year + (1 if months[em.upper()] < months[sm.upper()] else 0)
+                end_date = calendar_date(end_year, months[em.upper()], int(ed))
+                start = datetime(start_date.year, start_date.month, start_date.day, tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
+                end = datetime(end_date.year, end_date.month, end_date.day, 23, 59, 59, tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
+            resonators = [name.strip() for name in names.split(",") if name.strip()]
+            weapons = [part.strip() for part in (weapon or "").split(",") if part.strip()]
+            output.append({
+                "title": ", ".join(resonators), "version": vm.group(1), "phase": int(pm.group(1)),
+                "startAt": start, "endAt": end, "weapon": ", ".join(weapons),
+                "resonatorImages": {name: image for name in resonators if (image := fandom_image(name))},
+                "weaponImages": {name: image for name in weapons if (image := fandom_image(name))},
+                "status": "COMMUNITY", "confidence": 0.86,
+                "sourceLabel": "WuWaBuild banner schedule", "sourceUrls": [url], "snapshotAt": now
+            })
+        if output:
+            return output
+        return None
     if source.get("snapshotType") == "current":
         current = re.search(r"Current WuWa banner\s*:\s*([^\.]+?)\.\s*Banner", text, re.I)
         version = VERSION_RE.search(text)
@@ -307,7 +349,7 @@ def banner_snapshot(source):
         }
     heading = next((clean_text(h.get_text(" ", strip=True)) for h in soup.find_all(["h1", "h2", "h3"]) if "countdown" in h.get_text(" ", strip=True).lower()), "")
     match = re.search(r"([A-Z][A-Za-z]+(?:,\s*[A-Z][A-Za-z]+)*(?:,?\s+and\s+[A-Z][A-Za-z]+)?)\s+Banner Countdown", heading, re.I)
-    release = re.search(r"is set to release (?:alongside .+? )?on\s+([A-Z][a-z]+\s+\d{1,2},\s+20\d{2})", text, re.I)
+    release = re.search(r"(?:set to release|release|banner starts?)\b.+?\bon\s+([A-Z][a-z]+\s+\d{1,2},\s+20\d{2})", text, re.I)
     title = clean_text(match.group(1)).replace(" and ", ", ") if match else ""
     if not title:
         return None
@@ -326,20 +368,54 @@ def banner_snapshot(source):
         "status": "COMMUNITY", "confidence": 0.78,
         "sourceLabel": "GenGamer Countdown", "sourceUrls": [url], "snapshotAt": now
     }
+
+
+def timeline_weapon_details(source):
+    """Read labeled weapon-banner artwork from the public WuWa Tracker timeline."""
+    r = session.get(source["url"], timeout=TIMEOUT)
+    r.raise_for_status()
+    soup = BeautifulSoup(r.text, "html.parser")
+    details, labels = {}, []
+    for node in soup.find_all(["img", "a", "figure", "div"]):
+        for value in (node.get("alt", ""), node.get("title", ""), node.get("aria-label", "")):
+            if value:
+                labels.append(clean_text(value))
+    labels += [clean_text(s.get_text(" ", strip=True)) for s in soup.find_all("script") if s.string]
+    for label in labels:
+        match = re.search(r"([A-Z][A-Za-z0-9'’ -]{1,60}?)\s*[-–:]\s*([A-Z][A-Za-z0-9'’ -]{1,30}?)\s+Weapon Banner", label, re.I)
+        if match:
+            weapon, character = (clean_text(x).strip(" -–:") for x in match.groups())
+            if weapon and character and character.lower() not in {"weapon", "banner"}:
+                details[character] = weapon
+    return details
+
+
 def main():
-    items, errors, snapshots = [], [], []
+    items, errors, snapshots, timeline_weapons = [], [], [], {}
     for source in SOURCES:
         try:
+            if source['kind'] == 'timeline_weapons':
+                timeline_weapons.update(timeline_weapon_details(source))
+                continue
             if source['kind'] == 'banner_snapshot':
                 snapshot = banner_snapshot(source)
                 if snapshot:
-                    snapshots.append(snapshot)
+                    snapshots.extend(snapshot if isinstance(snapshot, list) else [snapshot])
                 continue
             fn = {'google_news': google_news, 'rss': rss, 'html': html_page}[source['kind']]
             for item in fn(source):
                 if item: items.append(item)
         except Exception as exc:
             errors.append({"sourceId": source['id'], "error": str(exc)[:300]})
+
+    for snapshot in snapshots:
+        characters = [part.strip() for part in re.split(r",|\band\b", snapshot.get("title", "")) if part.strip()]
+        weapons = list(dict.fromkeys(timeline_weapons[name] for name in characters if name in timeline_weapons))
+        if weapons:
+            snapshot["weapon"] = ", ".join(weapons)
+            snapshot["weaponImages"] = {name: image for name in weapons if (image := fandom_image(name))}
+            snapshot["sourceUrls"] = list(dict.fromkeys(snapshot.get("sourceUrls", []) + ["https://wuwatracker.com/timeline"]))
+            snapshot["sourceLabel"] = snapshot.get("sourceLabel", "Community schedule") + " + WuWa Tracker Timeline"
 
     # Deduplicate URLs first, then near-identical titles.
     by_url = {}
@@ -366,6 +442,7 @@ def main():
         "versions": versions[:30],
         "banners": banners[:80],
         "scheduleSnapshots": snapshots,
+        "weaponDetails": timeline_weapons,
         # Keep the complete evidence-bearing collection and also expose convenient
         # lifecycle buckets for clients that want a direct active/upcoming view.
         "activeBanners": [b for b in banners if b.get("startAt") and b.get("endAt") and b["startAt"] <= datetime.now(timezone.utc).isoformat() <= b["endAt"]][:40],

@@ -4,6 +4,7 @@ import android.Manifest
 import android.app.*
 import android.content.*
 import android.content.pm.PackageManager
+import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -12,6 +13,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -22,6 +24,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.Alignment
@@ -62,7 +66,7 @@ enum class Server(val label: String, val zone: String) {
 data class TrackerEvent(val title: String, val type: String, val start: Instant, val end: Instant?, val note: String, val sourceUrl: String = "", val status: String = "COMMUNITY", val confidence: Double = 0.0)
 data class FeedItem(val title: String, val url: String, val summary: String, val status: String, val source: String, val publishedAt: String, val confidence: Double)
 data class VersionIntel(val version: String, val status: String, val confidence: Double, val sourceUrls: List<String>)
-data class BannerIntel(val title: String, val version: String?, val phase: Int?, val startAt: Instant?, val endAt: Instant?, val status: String, val confidence: Double, val sourceUrls: List<String>, val sourceLabel: String = "Website", val weaponClaim: String? = null)
+data class BannerIntel(val title: String, val version: String?, val phase: Int?, val startAt: Instant?, val endAt: Instant?, val status: String, val confidence: Double, val sourceUrls: List<String>, val sourceLabel: String = "Website", val weaponClaim: String? = null, val resonatorImages: Map<String,String> = emptyMap(), val weaponImages: Map<String,String> = emptyMap())
 data class ResonatorIntel(val name: String, val version: String?, val phase: Int?, val element: String?, val weapon: String?, val status: String, val confidence: Double, val sourceUrls: List<String>, val sourceLabel: String = "Website", val weaponClaim: String? = null)
 
 data class UiState(
@@ -189,18 +193,18 @@ private fun WuWaTrackerRoot() {
     val version=state.version.takeIf{it!="Unknown"}?:"3.7"
     val feed=state.feedItems.filter{it.relevant(version,now)}.sortedByDescending{runCatching{Instant.parse(it.publishedAt)}.getOrDefault(Instant.EPOCH)}
     val banners=state.banners.filter{it.relevant(version,now)}
-    val active=(banners.filter{it.startAt!=null&&it.startAt<=now&&(it.endAt==null||it.endAt>now)}+banners.filter{it.sourceLabel.contains("WuWa Banners",true)}).distinctBy{it.title+it.phase}.take(4)
-    val upcoming=(banners.filter{it.startAt?.isAfter(now)==true}+banners.filter{it.sourceLabel.contains("GenGamer Countdown",true)}).distinctBy{it.title+it.phase}.sortedBy{it.startAt?:Instant.MAX}.take(4)
+    val active=banners.filter{it.startAt!=null&&it.startAt<=now&&(it.endAt==null||it.endAt>now)}.sortedBy{it.phase}.distinctBy{it.title+it.phase}
+    val upcoming=banners.filter{it.startAt?.isAfter(now)==true}.sortedBy{it.startAt}.distinctBy{it.title+it.phase}
     ArtworkScreen(modifier,R.drawable.bg_intel){LazyColumn(Modifier.fillMaxSize().padding(horizontal=16.dp,vertical=12.dp),verticalArrangement=Arrangement.spacedBy(10.dp)){
         item{Text("Intelligence",style=MaterialTheme.typography.headlineMedium,fontWeight=FontWeight.Bold)}
         item{InfoCard("Public intelligence feed",if(syncing)"Refreshing…" else feed.size.toString()+" recent reports · "+banners.size+" relevant banner claims",listOf(syncMessage.takeIf{it.isNotBlank()},state.lastSync.takeIf{it.isNotBlank()}?.let{"Last sync: "+it}).filterNotNull().joinToString(" · ").ifBlank{"Updated from free public sources."})}
         item{Button(onClick=onRefresh,enabled=!syncing,modifier=Modifier.fillMaxWidth()){Text(if(syncing)"Refreshing…" else "Refresh intelligence")}}
         item{Text("Current version · "+version,style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.Bold)}
-        item{Text("Active Resonator / weapon banners",style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.SemiBold)}
+        item{Text("Active Resonator / Weapon Banners",style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.SemiBold)}
         if(active.isEmpty()) item{InfoCard("Live schedule","Banner details will appear here when the public feed refreshes.","No external site is needed to view the schedule.")}
         items(active){b->BannerOverviewCard(b,true)}
-        item{Text("Upcoming banners",style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.SemiBold)}
-        if(upcoming.isEmpty()) item{InfoCard("Upcoming schedule","No upcoming banner details are available in the latest feed yet.","Refresh after the feed has been deployed.")}
+        item{Text("Upcoming Resonator / Weapon Banners",style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.SemiBold)}
+        if(upcoming.isEmpty()) item{InfoCard("Upcoming schedule","No upcoming schedule details are available in the feed right now.","Check again after the next feed refresh.")}
         items(upcoming){b->BannerOverviewCard(b,false)}
         groups.forEach{g->
             val rows=feed.filter{it.status.equals(g.status,true)&&(g.status!="LEAK"||it.isFutureLeak(version))}.take(12)
@@ -217,21 +221,27 @@ private fun WuWaTrackerRoot() {
     }}
 }
 private data class IntelGroup(val title:String,val status:String,val emptyMessage:String)
-@Composable private fun SectionHeader(g:IntelGroup,closed:Boolean,toggle:()->Unit){val art=when(g.status){"OFFICIAL"->R.drawable.bg_official;"LEAK"->R.drawable.bg_leaks;else->R.drawable.bg_community};Card(Modifier.fillMaxWidth().clickable(onClick=toggle),colors=CardDefaults.cardColors(containerColor=Color(0xDD211E29))){Box{Image(painterResource(art),null,contentScale=ContentScale.Crop,modifier=Modifier.fillMaxWidth().height(82.dp),alpha=0.48f);Row(Modifier.fillMaxWidth().padding(16.dp),verticalAlignment=Alignment.CenterVertically){Column(Modifier.weight(1f)){Text(g.title,style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.Bold);Text(if(closed)"Tap to expand" else g.status,style=MaterialTheme.typography.labelSmall)};Text(if(closed)"⌄" else "⌃",style=MaterialTheme.typography.headlineSmall,color=MaterialTheme.colorScheme.primary)}}}}
+@Composable private fun SectionHeader(g:IntelGroup,closed:Boolean,toggle:()->Unit){Card(Modifier.fillMaxWidth().clickable(onClick=toggle),colors=CardDefaults.cardColors(containerColor=when(g.status){"OFFICIAL"->Color(0xFF263746);"LEAK"->Color(0xFF482D3C);else->Color(0xFF303044)})){Row(Modifier.fillMaxWidth().padding(horizontal=18.dp,vertical=12.dp),verticalAlignment=Alignment.CenterVertically){Column(Modifier.weight(1f)){Text(g.title,style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.Bold,color=Color.White);Text(if(closed)"Tap to expand" else g.status,style=MaterialTheme.typography.labelSmall,color=Color.LightGray)};ChevronControl(closed)}}}
+@Composable private fun ChevronControl(collapsed:Boolean){Box(Modifier.size(44.dp).clip(CircleShape).background(Color(0xFF51435F)),contentAlignment=Alignment.Center){Text(if(collapsed)"⌄" else "⌃",style=MaterialTheme.typography.headlineMedium,fontWeight=FontWeight.Bold,color=Color.White)}}
 @Composable private fun BannerOverviewCard(b:BannerIntel,current:Boolean){
-    val hsin=b.title.contains("Hsin",true)
-    Card(Modifier.fillMaxWidth(),colors=CardDefaults.cardColors(containerColor=Color(0xDD211E29))){
-        Row(Modifier.fillMaxWidth().padding(14.dp),horizontalArrangement=Arrangement.spacedBy(12.dp),verticalAlignment=Alignment.CenterVertically){
-            if(hsin) Image(painterResource(R.drawable.wuwa_wallpaper),"Hsin",contentScale=ContentScale.Crop,modifier=Modifier.size(width=76.dp,height=98.dp).clip(RoundedCornerShape(10.dp)))
-            Column(Modifier.weight(1f),verticalArrangement=Arrangement.spacedBy(4.dp)){
-                Text(if(current)"LIVE BANNER" else "UPCOMING",style=MaterialTheme.typography.labelLarge,color=MaterialTheme.colorScheme.primary)
-                Text(b.title,style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.Bold)
-                Text(listOfNotNull(b.version?.let{"Version "+it},b.phase?.let{"Phase "+it},b.startAt?.let{(if(current)"From " else "Starts ")+dateOnly(it)},b.endAt?.let{"Until "+dateOnly(it)},b.weaponClaim?.let{"Featured weapon: "+it}).joinToString(" · ").ifBlank{"Schedule details not yet available"},style=MaterialTheme.typography.bodySmall)
-                Text(b.status+" · "+b.sourceLabel+" · Check exact times in-game",style=MaterialTheme.typography.labelSmall)
+    var expanded by remember(b.title,current){mutableStateOf(false)}
+    val names=b.title.split(Regex("\\s*,\\s*|\\s+and\\s+" )).map{it.trim()}.filter{it.isNotBlank()}
+    val weapons=b.weaponClaim?.split(Regex("\\s*,\\s*|\\s+and\\s+"))?.map{it.trim()}?.filter{it.isNotBlank()}.orEmpty()
+    Card(Modifier.fillMaxWidth(),colors=CardDefaults.cardColors(containerColor=if(current)Color(0xFF292438) else Color(0xFF26323C))){Column(Modifier.padding(16.dp),verticalArrangement=Arrangement.spacedBy(9.dp)){
+        Row(Modifier.fillMaxWidth().clickable{expanded=!expanded},verticalAlignment=Alignment.CenterVertically){val lead=names.firstOrNull().orEmpty();val localPortrait=lead.contains("Hsin",true);val remote=b.resonatorImages[lead];if(remote!=null)RemoteArtwork(remote,lead) else if(localPortrait)Image(painterResource(R.drawable.hsin_portrait),lead,contentScale=ContentScale.Crop,modifier=Modifier.size(68.dp).clip(CircleShape));Column(Modifier.weight(1f).padding(start=if(remote!=null||localPortrait)12.dp else 0.dp)){Text(if(current)"ACTIVE BANNER" else "UPCOMING BANNER",style=MaterialTheme.typography.labelLarge,color=MaterialTheme.colorScheme.primary);Text(lead.ifBlank{b.title},style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.Bold);Text(listOfNotNull(b.version?.let{"Version $it"},b.phase?.let{"Phase $it"},b.startAt?.let{(if(current)"From " else "Starts ")+dateOnly(it)},b.endAt?.let{"Until "+dateOnly(it)}).joinToString(" · "),style=MaterialTheme.typography.bodySmall)};ChevronControl(!expanded)}
+        if(expanded){
+            Text("Resonators",style=MaterialTheme.typography.titleSmall,fontWeight=FontWeight.Bold)
+            names.forEachIndexed{index,name->
+                Row(Modifier.fillMaxWidth().padding(vertical=5.dp),horizontalArrangement=Arrangement.spacedBy(12.dp),verticalAlignment=Alignment.CenterVertically){val image=b.resonatorImages[name];if(image!=null)RemoteArtwork(image,name) else if(name.contains("Hsin",true))Image(painterResource(R.drawable.hsin_portrait),"Hsin",contentScale=ContentScale.Crop,modifier=Modifier.size(68.dp).clip(CircleShape)) else Box(Modifier.size(68.dp).clip(CircleShape).background(Color(0xFF393441)),contentAlignment=Alignment.Center){Text(name.take(1).uppercase(),style=MaterialTheme.typography.headlineMedium,color=Color.White)};Column{Text("Resonator ${index+1} · $name",fontWeight=FontWeight.SemiBold);Text(listOfNotNull(b.version?.let{"Version $it"},b.phase?.let{"Phase $it"},b.startAt?.let{dateOnly(it)},b.endAt?.let{"until "+dateOnly(it)}).joinToString(" · ").ifBlank{"Dates not provided by source"},style=MaterialTheme.typography.bodySmall);Text(b.status+" · "+b.sourceLabel+" · Exact server time not listed by source",style=MaterialTheme.typography.labelSmall)}}
             }
+            HorizontalDivider()
+            Text("Weapons",style=MaterialTheme.typography.titleSmall,fontWeight=FontWeight.Bold)
+            if(weapons.isEmpty())Text("Weapon details are not available in the current feed yet.",style=MaterialTheme.typography.bodySmall,color=Color.LightGray) else weapons.forEachIndexed{index,name->Row(Modifier.fillMaxWidth().padding(vertical=5.dp),horizontalArrangement=Arrangement.spacedBy(12.dp),verticalAlignment=Alignment.CenterVertically){b.weaponImages[name]?.let{RemoteArtwork(it,name)};Column{Text("Weapon ${index+1} · $name",fontWeight=FontWeight.SemiBold);Text("${b.version?.let{"Version $it · "}.orEmpty()}${b.phase?.let{"Phase $it · "}.orEmpty()}${b.startAt?.let{dateOnly(it)}?:"Schedule date unavailable"}",style=MaterialTheme.typography.bodySmall)}}}
+            Text("Verify exact server timing in-game.",style=MaterialTheme.typography.labelSmall,color=Color.LightGray)
         }
-    }
+    }}
 }
+@Composable private fun RemoteArtwork(url:String,description:String){var image by remember(url){mutableStateOf<ImageBitmap?>(null)};LaunchedEffect(url){image=withContext(Dispatchers.IO){runCatching{require(url.startsWith("https://"));URL(url).openConnection().apply{connectTimeout=8000;readTimeout=8000}.getInputStream().use{BitmapFactory.decodeStream(it)?.asImageBitmap()}}.getOrNull()}};if(image!=null)Image(image!!,description,contentScale=ContentScale.Crop,modifier=Modifier.size(68.dp).clip(CircleShape))else Box(Modifier.size(68.dp).clip(CircleShape).background(Color(0xFF393441)),contentAlignment=Alignment.Center){Text(description.take(1).uppercase(),style=MaterialTheme.typography.headlineMedium,color=Color.White)}}
 @Composable private fun SourceLinkCard(title:String,body:String,url:String){Card(Modifier.fillMaxWidth().clickable{openUrl(url)}){Column(Modifier.padding(16.dp),verticalArrangement=Arrangement.spacedBy(5.dp)){Text(title,fontWeight=FontWeight.SemiBold);Text(body,style=MaterialTheme.typography.bodySmall);Text("Open source ↗",color=MaterialTheme.colorScheme.primary)}}}
 private fun dateOnly(i:Instant)=DateTimeFormatter.ofPattern("MMM d, yyyy",Locale.getDefault()).withZone(ZoneOffset.UTC).format(i)
 private fun BannerIntel.relevant(version:String,now:Instant):Boolean = if(this.version!=null) compareVersion(this.version,version)>=0 else (endAt?.isAfter(now)==true || startAt?.isAfter(now)==true)
@@ -282,7 +292,7 @@ private fun showCustomReminderPicker(context: Context, onSelected: (Instant) -> 
     }, initial.year, initial.monthValue - 1, initial.dayOfMonth).apply { datePicker.minDate = System.currentTimeMillis() }.show()
 }
 
-@Composable private fun FeedCard(item: FeedItem) { val label = if (item.status == "LEAK") "LEAK · UNCONFIRMED" else item.status; Card(Modifier.fillMaxWidth().clickable { openUrl(item.url) }) { Column(Modifier.padding(16.dp), Arrangement.spacedBy(6.dp)) { Text("$label", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold); Text(item.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold); if (item.summary.isNotBlank()) Text(item.summary); Text("Source: ${item.source} · Tap to open matching article", style = MaterialTheme.typography.bodySmall) } } }
+@Composable private fun FeedCard(item: FeedItem) { val label = if (item.status == "LEAK") "LEAK · UNCONFIRMED" else item.status; val tint=when(item.status.uppercase()){"OFFICIAL"->Color(0xFF314A5B);"LEAK"->Color(0xFF523241);else->Color(0xFF3A354D)};Card(Modifier.fillMaxWidth().clickable { openUrl(item.url) },colors=CardDefaults.cardColors(containerColor=tint)) { Column(Modifier.padding(16.dp), Arrangement.spacedBy(6.dp)) { Text("$label", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold,color=Color(0xFFFFD68A)); Text(item.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold); if (item.summary.isNotBlank()) Text(item.summary); Text("Source: ${item.source} · Tap to open matching article", style = MaterialTheme.typography.bodySmall) } } }
 @Composable private fun IntelCard(title: String, body: String, url: String?) { Card(Modifier.fillMaxWidth().clickable(enabled = url?.startsWith("https://") == true) { openUrl(url!!) }) { Column(Modifier.padding(16.dp), Arrangement.spacedBy(4.dp)) { Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold); Text(body); if (url != null) Text("Source evidence • tap to open", style = MaterialTheme.typography.bodySmall) } } }
 @Composable private fun TaskCard(title: String, subtitle: String, done: Boolean, onDone: (Boolean) -> Unit) { Card { Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) { Column(Modifier.weight(1f)) { Text(title, fontWeight = FontWeight.SemiBold); Text(subtitle) }; Checkbox(done, onDone) } } }
 @Composable private fun EventCard(event: TrackerEvent, now: Instant) { val active = event.start <= now && (event.end == null || event.end.isAfter(now)); val remaining = if (event.start == Instant.EPOCH) "Ongoing / recurring" else if (active && event.end != null) "Ends in ${durationText(Duration.between(now, event.end))}" else if (event.start > now) "Starts in ${durationText(Duration.between(now, event.start))}" else "Ended"; Card(Modifier.fillMaxWidth().clickable(enabled = event.sourceUrl.isNotBlank()) { openUrl(event.sourceUrl) }) { Column(Modifier.padding(16.dp), Arrangement.spacedBy(5.dp)) { Text(event.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold); Text(remaining); Text(event.note, style = MaterialTheme.typography.bodySmall); if (event.status == "LEAK") Text("LEAK · UNCONFIRMED", style = MaterialTheme.typography.labelSmall) } } }
@@ -314,7 +324,7 @@ private suspend fun loadState(context: Context): UiState {
         lastSync = p[stringPreferencesKey("last_sync")] ?: "",
         serverSelected = p[booleanPreferencesKey("server_selected")] ?: false,
         customReminderAt = p[stringPreferencesKey("custom_reminder_at")]?.let { instant(it) },
-        collapsedSections = p[stringPreferencesKey("collapsed_sections")]?.split(",")?.filter{it.isNotBlank()}?.toSet() ?: emptySet(),
+        collapsedSections = if (p[stringPreferencesKey("collapse_migration")] != "expanded-default-v2") emptySet() else p[stringPreferencesKey("collapsed_sections")]?.split(",")?.filter{it.isNotBlank()}?.toSet() ?: emptySet(),
         monthlyTower = p[stringPreferencesKey("cycle_key")] == cycleKey(server) && (p[booleanPreferencesKey("monthly_tower")] ?: false),
         monthlyWastes = p[stringPreferencesKey("cycle_key")] == cycleKey(server) && (p[booleanPreferencesKey("monthly_wastes")] ?: false),
         monthlyMatrix = p[stringPreferencesKey("cycle_key")] == cycleKey(server) && (p[booleanPreferencesKey("monthly_matrix")] ?: false)
@@ -322,18 +332,18 @@ private suspend fun loadState(context: Context): UiState {
 }
 
 private suspend fun saveState(context: Context, state: UiState) { context.dataStore.edit { p ->
-    p[stringPreferencesKey("server")] = state.server.name; p[stringPreferencesKey("reset_key")] = resetKey(state.server); p[booleanPreferencesKey("daily")] = state.dailyDone; p[booleanPreferencesKey("lunite")] = state.luniteDone; p[booleanPreferencesKey("reminder")] = state.reminderEnabled; p[intPreferencesKey("lead")] = state.reminderLead; p[stringPreferencesKey("feed_url")] = state.feedUrl; p[stringPreferencesKey("last_sync")] = state.lastSync; p[stringPreferencesKey("version")] = state.version; p[stringPreferencesKey("cached_feed")] = stateToJson(state).toString(); p[booleanPreferencesKey("server_selected")] = state.serverSelected; p[stringPreferencesKey("collapsed_sections")] = state.collapsedSections.joinToString(","); p[stringPreferencesKey("cycle_key")] = cycleKey(state.server); p[booleanPreferencesKey("monthly_tower")] = state.monthlyTower; p[booleanPreferencesKey("monthly_wastes")] = state.monthlyWastes; p[booleanPreferencesKey("monthly_matrix")] = state.monthlyMatrix; state.customReminderAt?.let { p[stringPreferencesKey("custom_reminder_at")] = it.toString() } ?: p.remove(stringPreferencesKey("custom_reminder_at"))
+    p[stringPreferencesKey("server")] = state.server.name; p[stringPreferencesKey("reset_key")] = resetKey(state.server); p[booleanPreferencesKey("daily")] = state.dailyDone; p[booleanPreferencesKey("lunite")] = state.luniteDone; p[booleanPreferencesKey("reminder")] = state.reminderEnabled; p[intPreferencesKey("lead")] = state.reminderLead; p[stringPreferencesKey("feed_url")] = state.feedUrl; p[stringPreferencesKey("last_sync")] = state.lastSync; p[stringPreferencesKey("version")] = state.version; p[stringPreferencesKey("cached_feed")] = stateToJson(state).toString(); p[booleanPreferencesKey("server_selected")] = state.serverSelected; p[stringPreferencesKey("collapsed_sections")] = state.collapsedSections.joinToString(","); p[stringPreferencesKey("collapse_migration")] = "expanded-default-v2"; p[stringPreferencesKey("cycle_key")] = cycleKey(state.server); p[booleanPreferencesKey("monthly_tower")] = state.monthlyTower; p[booleanPreferencesKey("monthly_wastes")] = state.monthlyWastes; p[booleanPreferencesKey("monthly_matrix")] = state.monthlyMatrix; state.customReminderAt?.let { p[stringPreferencesKey("custom_reminder_at")] = it.toString() } ?: p.remove(stringPreferencesKey("custom_reminder_at"))
 } }
 
 private fun stateToJson(state: UiState) = JSONObject().apply {
     put("latestVersion", state.version); put("news", JSONArray().apply { state.feedItems.forEach { put(JSONObject().apply { put("title",it.title); put("url",it.url); put("summary",it.summary); put("status",it.status); put("sourceLabel",it.source); put("publishedAt",it.publishedAt); put("confidence",it.confidence) }) } })
     put("events", JSONArray().apply { state.events.filter { it.start != Instant.EPOCH }.forEach { put(JSONObject().apply { put("title",it.title); put("type",it.type); put("startAt",it.start.toString()); if (it.end != null) put("endAt",it.end.toString()); put("note",it.note); put("sourceUrl",it.sourceUrl); put("status",it.status); put("confidence",it.confidence) }) } })
     put("versions", JSONArray().apply { state.versions.forEach { put(JSONObject().apply { put("version",it.version); put("status",it.status); put("confidence",it.confidence); put("sourceUrls",JSONArray(it.sourceUrls)) }) } })
-    put("banners", JSONArray().apply { state.banners.forEach { put(JSONObject().apply { put("title",it.title); put("version",it.version); put("phase",it.phase); put("startAt",it.startAt?.toString()); put("endAt",it.endAt?.toString()); put("status",it.status); put("confidence",it.confidence); put("sourceLabel",it.sourceLabel); put("weapon",it.weaponClaim); put("sourceUrls",JSONArray(it.sourceUrls)) }) } })
+    put("banners", JSONArray().apply { state.banners.forEach { put(JSONObject().apply { put("title",it.title); put("version",it.version); put("phase",it.phase); put("startAt",it.startAt?.toString()); put("endAt",it.endAt?.toString()); put("status",it.status); put("confidence",it.confidence); put("sourceLabel",it.sourceLabel); put("weapon",it.weaponClaim); put("resonatorImages",JSONObject(it.resonatorImages)); put("weaponImages",JSONObject(it.weaponImages)); put("sourceUrls",JSONArray(it.sourceUrls)) }) } })
     put("resonators", JSONArray().apply { state.resonators.forEach { put(JSONObject().apply { put("name",it.name); put("version",it.version); put("phase",it.phase); put("element",it.element); put("weapon",it.weapon); put("status",it.status); put("confidence",it.confidence); put("sourceUrls",JSONArray(it.sourceUrls)) }) } })
 }
 
-private fun parseFeed(raw: String?): FeedResult { if (raw.isNullOrBlank()) return FeedResult(emptyList(), emptyList(), emptyList(), emptyList(), emptyList(), null); return runCatching { val root=JSONObject(raw); FeedResult(parseNews(root.optJSONArray("news") ?: root.optJSONArray("items") ?: JSONArray()), parseEvents(root.optJSONArray("events") ?: JSONArray()), parseVersions(root.optJSONArray("versions") ?: JSONArray()), (parseBanners(root.optJSONArray("scheduleSnapshots") ?: JSONArray()) + parseBanners(root.optJSONArray("banners") ?: JSONArray()) + parseBanners(root.optJSONArray("activeBanners") ?: JSONArray()) + parseBanners(root.optJSONArray("upcomingBanners") ?: JSONArray())).distinctBy { it.title + it.version + it.phase }, parseResonators(root.optJSONArray("resonators") ?: JSONArray()), root.optString("latestVersion").takeIf { it.isNotBlank() } ?: root.optString("version").takeIf { it.isNotBlank() }) }.getOrDefault(FeedResult(emptyList(),emptyList(),emptyList(),emptyList(),emptyList(),null)) }
+private fun parseFeed(raw: String?): FeedResult { if (raw.isNullOrBlank()) return FeedResult(emptyList(), emptyList(), emptyList(), emptyList(), emptyList(), null); return runCatching { val root=JSONObject(raw); val bannerRows=parseBanners(root.optJSONArray("scheduleSnapshots") ?: JSONArray()) + parseBanners(root.optJSONArray("banners") ?: JSONArray()) + parseBanners(root.optJSONArray("activeBanners") ?: JSONArray()) + parseBanners(root.optJSONArray("upcomingBanners") ?: JSONArray()); val banners=bannerRows.groupBy { it.title.lowercase(Locale.ROOT)+it.version+it.phase }.values.mapNotNull { rows -> rows.maxByOrNull { (if(it.weaponClaim.isNullOrBlank())0 else 10+it.weaponClaim.length)+it.weaponImages.size*3+it.resonatorImages.size } }; FeedResult(parseNews(root.optJSONArray("news") ?: root.optJSONArray("items") ?: JSONArray()), parseEvents(root.optJSONArray("events") ?: JSONArray()), parseVersions(root.optJSONArray("versions") ?: JSONArray()), banners, parseResonators(root.optJSONArray("resonators") ?: JSONArray()), root.optString("latestVersion").takeIf { it.isNotBlank() } ?: root.optString("version").takeIf { it.isNotBlank() }) }.getOrDefault(FeedResult(emptyList(),emptyList(),emptyList(),emptyList(),emptyList(),null)) }
 private fun sourceLabel(type: String, name: String, id: String): String = when {
     type.startsWith("X") -> if (name.isNotBlank() && name != id) "X · $name" else "X (indexed)"
     type == "Reddit" -> if (name.isNotBlank() && name != id) "Reddit · $name" else "Reddit"
@@ -371,7 +381,9 @@ private fun parseBanners(a: JSONArray): List<BannerIntel> = buildList {
             o.optDouble("confidence", 0.0),
             strings(o.optJSONArray("sourceUrls") ?: o.optJSONArray("sources")),
             (o.optString("sourceLabel").takeIf{it.isNotBlank()&&it!="null"} ?: firstEvidenceLabel(o)),
-            o.optString("weapon").takeIf { it.isNotBlank() && it != "null" }
+            o.optString("weapon").takeIf { it.isNotBlank() && it != "null" },
+            stringMap(o.optJSONObject("resonatorImages")),
+            stringMap(o.optJSONObject("weaponImages"))
         ))
     }
 }
@@ -394,6 +406,7 @@ private fun parseResonators(a: JSONArray): List<ResonatorIntel> = buildList {
 }
 private fun instant(s:String?)=runCatching{if(s.isNullOrBlank()||s=="null")null else Instant.parse(s)}.getOrNull()
 private fun strings(a:JSONArray?):List<String> = if(a==null) emptyList() else buildList{for(i in 0 until a.length()) add(a.optString(i))}
+private fun stringMap(o:JSONObject?):Map<String,String> = if(o==null) emptyMap() else buildMap{val keys=o.keys();while(keys.hasNext()){val key=keys.next();o.optString(key).takeIf{it.startsWith("https://")}?.let{put(key,it)}}}
 private fun mergeEvents(base:List<TrackerEvent>, remote:List<TrackerEvent>)=(base+remote).distinctBy{"${it.type}:${it.title}"}
 
 private suspend fun fetchFeed(url: String): FeedResult = withContext(Dispatchers.IO) {
@@ -436,7 +449,7 @@ class FeedSyncWorker(appContext: Context, params: WorkerParameters):CoroutineWor
                     put("news",JSONArray().apply{f.items.forEach{put(JSONObject().apply{put("title",it.title);put("url",it.url);put("summary",it.summary);put("status",it.status);put("sourceLabel",it.source);put("publishedAt",it.publishedAt);put("confidence",it.confidence)})}});
                     put("events",JSONArray().apply{f.events.forEach{put(JSONObject().apply{put("title",it.title);put("type",it.type);put("startAt",it.start.toString());put("endAt",it.end?.toString());put("note",it.note);put("sourceUrl",it.sourceUrl);put("status",it.status);put("confidence",it.confidence)})}});
                     put("versions",JSONArray().apply{f.versions.forEach{put(JSONObject().apply{put("version",it.version);put("status",it.status);put("confidence",it.confidence);put("sourceUrls",JSONArray(it.sourceUrls))})}});
-                    put("banners",JSONArray().apply{f.banners.forEach{put(JSONObject().apply{put("title",it.title);put("version",it.version);put("phase",it.phase);put("startAt",it.startAt?.toString());put("endAt",it.endAt?.toString());put("status",it.status);put("confidence",it.confidence);put("sourceLabel",it.sourceLabel);put("weapon",it.weaponClaim);put("sourceUrls",JSONArray(it.sourceUrls))})}});
+                    put("banners",JSONArray().apply{f.banners.forEach{put(JSONObject().apply{put("title",it.title);put("version",it.version);put("phase",it.phase);put("startAt",it.startAt?.toString());put("endAt",it.endAt?.toString());put("status",it.status);put("confidence",it.confidence);put("sourceLabel",it.sourceLabel);put("weapon",it.weaponClaim);put("resonatorImages",JSONObject(it.resonatorImages));put("weaponImages",JSONObject(it.weaponImages));put("sourceUrls",JSONArray(it.sourceUrls))})}});
                     put("resonators",JSONArray().apply{f.resonators.forEach{put(JSONObject().apply{put("name",it.name);put("version",it.version);put("phase",it.phase);put("element",it.element);put("weapon",it.weapon);put("status",it.status);put("confidence",it.confidence);put("sourceUrls",JSONArray(it.sourceUrls))})}})
                 }.toString();
                 it[stringPreferencesKey("last_sync")]=Instant.now().toString();

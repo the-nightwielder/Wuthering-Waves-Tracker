@@ -113,6 +113,21 @@
       "url": "https://wuthering-countdown.gengamer.in/",
       "category": "community",
       "priority": 94
+    },
+    {
+      "id": "wuwabuild-snapshot",
+      "kind": "banner_snapshot",
+      "snapshotType": "wuwabuild",
+      "url": "https://www.wuwabuild.com/banners",
+      "category": "community",
+      "priority": 96
+    },
+    {
+      "id": "wuwatracker-timeline-weapons",
+      "kind": "timeline_weapons",
+      "url": "https://wuwatracker.com/timeline",
+      "category": "community",
+      "priority": 93
     }
   ]
 }

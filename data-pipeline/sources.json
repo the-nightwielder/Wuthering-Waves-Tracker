@@ -85,6 +85,20 @@
       "priority": 90
     },
     {
+      "id": "mone-leaks",
+      "kind": "google_news",
+      "query": "site:mone.gg/blog/wuthering-waves Wuthering Waves banner leak upcoming Resonator",
+      "category": "leak-community",
+      "priority": 60
+    },
+    {
+      "id": "uutop-leaks",
+      "kind": "google_news",
+      "query": "site:uu-top.com/en/blog Wuthering Waves banner leak upcoming Resonator",
+      "category": "leak-community",
+      "priority": 59
+    },
+    {
       "id": "u7buy-leaks",
       "kind": "google_news",
       "query": "site:u7buy.com Wuthering Waves banner leaks upcoming Resonator",

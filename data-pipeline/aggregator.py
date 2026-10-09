@@ -29,7 +29,7 @@ GAME_CONTEXT = re.compile(r"wuthering\s+waves|\bwuwa\b", re.I)
 REDDIT_TITLE_CONTEXT = re.compile(r"wuthering\s+waves|\bwuwa\b|resonator|banner|convene|\bversion\s*\d|\bv\d+\.\d+", re.I)
 LEAK_TERMS = re.compile(r"\b(leak|leaks|leaked|beta|datamine|datamined|test client|stc|subject to change|rumou?r|unconfirmed|sus|drip marketing leak)\b", re.I)
 OFFICIAL_TERMS = re.compile(r"official|version|maintenance|special program|special report|resonator reveal|profile|update notice|preview|event notice", re.I)
-VERSION_RE = re.compile(r"\b(?:(?:version|ver\.?|v)\s*|wuthering\s+waves\s*)(\d+\.\d+)\b", re.I)
+VERSION_RE = re.compile(r"\b(?:(?:version|ver\.?|v|wuwa)\s*|wuthering\s+waves\s*)(\d+\.\d+)\b", re.I)
 DATE_RE = re.compile(r"\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+([0-3]?\d)(?:st|nd|rd|th)?,?\s+(20\d{2})\b", re.I)
 DATE_RE_DMY = re.compile(r"\b([0-3]?\d)[/-](1[0-2]|0?[1-9])[/-](20\d{2})\b")
 TIME_RE = re.compile(r"\b(\d{1,2})(?::(\d{2}))?\s*(AM|PM)?\s*(?:UTC)?\s*([+-]\d{1,2})?\b", re.I)
@@ -197,6 +197,7 @@ def extract_entities(items):
         # phrases around "Resonator"/"5-star" and never claim a leak is confirmed.
         if RESONATOR_TERMS.search(text):
             patterns = [r"(?:new|upcoming|leaked|rumored|featured)\s+(?:5[- ]star|4[- ]star)?\s*(?:resonator|character)?\s*[:\-]?\s*([A-Z][A-Za-z]{2,18})",
+                        r"\b([A-Z][A-Za-z]{2,18})[,:]?\s+(?:is\s+)?(?:the\s+)?(?:(?:upcoming|new|leaked|rumored)\s+)?(?:version\s+\d+\.\d+\s+)?(?:5[- ]star\s+)?resonator\b",
                         r"\b([A-Z][A-Za-z]{2,18})\s+(?:resonator|banner|rerun)\b"]
             for pat in patterns:
                 m = re.search(pat, text)
@@ -427,7 +428,9 @@ def main():
             if source['kind'] == 'banner_snapshot':
                 snapshot = banner_snapshot(source)
                 if snapshot:
-                    snapshots.extend(snapshot if isinstance(snapshot, list) else [snapshot])
+                    for row in (snapshot if isinstance(snapshot, list) else [snapshot]):
+                        row['snapshotType'] = source.get('snapshotType')
+                        snapshots.append(row)
                 continue
             fn = {'google_news': google_news, 'rss': rss, 'html': html_page}[source['kind']]
             for item in fn(source):
@@ -437,14 +440,17 @@ def main():
 
     version_candidates = [m.group(1) for item in items if item.get("status") == "OFFICIAL"
                           for m in [VERSION_RE.search(item.get("title", "") + " " + item.get("summary", ""))] if m]
-    version_candidates += [snapshot["version"] for snapshot in snapshots if snapshot.get("version")]
+    # Upcoming snapshots can describe the next patch; using them as "current"
+    # advances the leak search one patch too far and hides the real next-version leaks.
+    version_candidates += [snapshot["version"] for snapshot in snapshots
+                           if snapshot.get("version") and snapshot.get("snapshotType") == "current"]
     current_version = max(version_candidates, key=lambda value: tuple(map(int, value.split(".")))) if version_candidates else None
     if current_version:
         major, minor = map(int, current_version.split("."))
         next_version = f"{major}.{minor + 1}"
         for source in next_version_searches:
             targeted = dict(source)
-            targeted["query"] = f"{source['query']} \"Wuthering Waves {next_version}\" OR \"v{next_version}\""
+            targeted["query"] = f"({source['query']}) (\"Wuthering Waves {next_version}\" OR \"WuWa {next_version}\" OR \"v{next_version}\")"
             try:
                 for item in google_news(targeted):
                     if item:

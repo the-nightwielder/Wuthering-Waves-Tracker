@@ -278,9 +278,10 @@ def banner_snapshot(source):
     url = r.url
     if source.get("snapshotType") == "wuwabuild":
         version = VERSION_RE.search(text)
-        resonator_art, weapon_art = [], []
-        labels = [clean_text(node.get("alt", "") or node.get("title", "") or node.get_text(" ", strip=True)) for node in soup.find_all(["img", "a"]) ]
-        for label in labels:
+        resonator_art, weapon_art, art_weapon_urls = [], [], {}
+        nodes = soup.find_all(["img", "a"])
+        for node in nodes:
+            label = clean_text(node.get("alt", "") or node.get("title", "") or node.get_text(" ", strip=True))
             if re.search(r"\bResonator\b", label, re.I):
                 candidate = re.sub(r"^.*?\bResonator\s+", "", label, flags=re.I).strip()
                 if candidate:
@@ -292,6 +293,9 @@ def banner_snapshot(source):
                     candidate = " ".join(parts[:len(parts)//2])
                 if candidate:
                     weapon_art.append(candidate)
+                    image_url = node.get("src") or node.get("data-src")
+                    if image_url:
+                        art_weapon_urls[candidate] = urljoin(url, image_url)
         art_weapon_map = dict(zip(resonator_art, weapon_art))
         output = []
         for anchor in soup.find_all("a"):
@@ -328,7 +332,7 @@ def banner_snapshot(source):
                 "title": ", ".join(resonators), "version": vm.group(1), "phase": int(pm.group(1)),
                 "startAt": start, "endAt": end, "weapon": ", ".join(weapons),
                 "resonatorImages": {name: image for name in resonators if (image := fandom_image(name))},
-                "weaponImages": {name: image for name in weapons if (image := fandom_image(name))},
+                "weaponImages": {name: image for name in weapons if (image := (fandom_image(name) or art_weapon_urls.get(name)))},
                 "status": "COMMUNITY", "confidence": 0.86,
                 "sourceLabel": "WuWaBuild banner schedule", "sourceUrls": [url], "snapshotAt": now
             })
@@ -377,11 +381,14 @@ def banner_snapshot(source):
     resonators = [name.strip() for name in re.split(r",|\band\b", title) if name.strip()]
     weapon_match = re.search(r"(?:featured|signature)\s+weapon(?:\s+banner)?\s*(?:is|:|—|-)\s*([A-Z][A-Za-z0-9'’ -]{2,40})", text, re.I)
     weapon = clean_text(weapon_match.group(1)).rstrip(" .") if weapon_match else None
+    banner_art = [urljoin(url, img.get("src") or img.get("data-src") or "") for img in soup.find_all("img")
+                  if "Phase 2 Banner" in (img.get("alt", "") + " " + img.get("title", "")) and (img.get("src") or img.get("data-src"))]
     return {
         "title": title, "version": version.group(1) if version else None,
         "phase": phase, "startAt": start, "endAt": None, "weapon": weapon,
         "resonatorImages": {name: image for name in resonators if (image := fandom_image(name))},
         "weaponImages": {weapon: image} if weapon and (image := fandom_image(weapon)) else {},
+        "bannerArtwork": banner_art,
         "status": "COMMUNITY", "confidence": 0.78,
         "sourceLabel": "GenGamer Countdown", "sourceUrls": [url], "snapshotAt": now
     }
@@ -408,11 +415,14 @@ def timeline_weapon_details(source):
 
 
 def main():
-    items, errors, snapshots, timeline_weapons = [], [], [], {}
+    items, errors, snapshots, timeline_weapons, next_version_searches = [], [], [], {}, []
     for source in SOURCES:
         try:
             if source['kind'] == 'timeline_weapons':
                 timeline_weapons.update(timeline_weapon_details(source))
+                continue
+            if source['kind'] == 'google_news' and source.get('category') == 'leak-community':
+                next_version_searches.append(source)
                 continue
             if source['kind'] == 'banner_snapshot':
                 snapshot = banner_snapshot(source)
@@ -425,12 +435,44 @@ def main():
         except Exception as exc:
             errors.append({"sourceId": source['id'], "error": str(exc)[:300]})
 
+    version_candidates = [m.group(1) for item in items if item.get("status") == "OFFICIAL"
+                          for m in [VERSION_RE.search(item.get("title", "") + " " + item.get("summary", ""))] if m]
+    version_candidates += [snapshot["version"] for snapshot in snapshots if snapshot.get("version")]
+    current_version = max(version_candidates, key=lambda value: tuple(map(int, value.split(".")))) if version_candidates else None
+    if current_version:
+        major, minor = map(int, current_version.split("."))
+        next_version = f"{major}.{minor + 1}"
+        for source in next_version_searches:
+            targeted = dict(source)
+            targeted["query"] = f"{source['query']} \"Wuthering Waves {next_version}\" OR \"v{next_version}\""
+            try:
+                for item in google_news(targeted):
+                    if item:
+                        items.append(item)
+            except Exception as exc:
+                errors.append({"sourceId": source["id"], "error": str(exc)[:300]})
+
+    # A small verified mapping prevents the signature weapons for the known live
+    # version from disappearing if the timeline temporarily omits its labels.
+    if current_version == "3.7":
+        timeline_weapons.update({"Hsin": "Blooming Jadehaven", "Chisa": "Kumokiri", "Iuno": "Moongazer's Sigil",
+                                 "Suoming": "Unspoken Rue", "Lynae": "Spectrum Blaster", "Lucilla": "Freeze Frame"})
+
     for snapshot in snapshots:
         characters = [part.strip() for part in re.split(r",|\band\b", snapshot.get("title", "")) if part.strip()]
         weapons = list(dict.fromkeys(timeline_weapons[name] for name in characters if name in timeline_weapons))
+        art = snapshot.pop("bannerArtwork", [])
+        if "GenGamer" in snapshot.get("sourceLabel", "") and len(art) >= 6:
+            resonator_images = snapshot.setdefault("resonatorImages", {})
+            weapon_images = snapshot.setdefault("weaponImages", {})
+            for index, character in enumerate(characters[:3]):
+                resonator_images[character] = art[index * 2]
+                weapon_name = timeline_weapons.get(character)
+                if weapon_name:
+                    weapon_images[weapon_name] = art[index * 2 + 1]
         if weapons:
             snapshot["weapon"] = ", ".join(weapons)
-            snapshot["weaponImages"] = {name: image for name in weapons if (image := fandom_image(name))}
+            snapshot.setdefault("weaponImages", {}).update({name: image for name in weapons if (image := fandom_image(name))})
             snapshot["sourceUrls"] = list(dict.fromkeys(snapshot.get("sourceUrls", []) + ["https://wuwatracker.com/timeline"]))
             snapshot["sourceLabel"] = snapshot.get("sourceLabel", "Community schedule") + " + WuWa Tracker Timeline"
 

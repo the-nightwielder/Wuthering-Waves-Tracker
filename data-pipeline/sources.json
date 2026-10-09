@@ -1,16 +1,15 @@
 {
   "sources": [
-    {"id":"official-news","kind":"google_news","query":"site:wutheringwaves.kurogames.com Wuthering Waves","category":"official","priority":100},
-    {"id":"official-notices","kind":"google_news","query":"site:wutheringwaves.kurogames.com Wuthering Waves version maintenance event resonator","category":"official","priority":100},
-    {"id":"wwgg","kind":"google_news","query":"site:wutheringwaves.gg Wuthering Waves","category":"community","priority":80},
-    {"id":"game8","kind":"google_news","query":"site:game8.co/games/Wuthering-Waves Wuthering Waves","category":"community","priority":70},
-    {"id":"ldshop","kind":"google_news","query":"site:ldshop.gg/blog/wuthering-waves Wuthering Waves","category":"community","priority":65},
-    {"id":"gamingonphone","kind":"google_news","query":"site:gamingonphone.com Wuthering Waves","category":"community","priority":60},
-    {"id":"x-search-leaks","kind":"google_news","query":"site:x.com Wuthering Waves leak leaks beta datamine resonator banner","category":"social","priority":58},
-    {"id":"x-search-news","kind":"google_news","query":"site:x.com Wuthering Waves official news update event","category":"social","priority":56},
+    {"id":"official-news","kind":"google_news","query":"site:wutheringwaves.kurogames.com Wuthering Waves official version update resonator convene","category":"official","priority":100},
+    {"id":"official-notices","kind":"google_news","query":"site:wutheringwaves.kurogames.com Wuthering Waves version maintenance event resonator banner","category":"official","priority":100},
+    {"id":"wwgg","kind":"google_news","query":"site:wutheringwaves.gg Wuthering Waves resonator banner version","category":"community","priority":80},
+    {"id":"game8","kind":"google_news","query":"site:game8.co/games/Wuthering-Waves Wuthering Waves resonator banner version","category":"community","priority":70},
+    {"id":"ldshop","kind":"google_news","query":"site:ldshop.gg/blog/wuthering-waves Wuthering Waves resonator banner version","category":"community","priority":65},
+    {"id":"gamingonphone","kind":"google_news","query":"site:gamingonphone.com Wuthering Waves resonator banner version","category":"community","priority":60},
+    {"id":"x-search-leaks","kind":"google_news","query":"site:x.com Wuthering Waves upcoming Resonator version leak beta datamine","category":"leak-community","priority":58},
+    {"id":"x-search-news","kind":"google_news","query":"site:x.com/Wuthering_Waves official Wuthering Waves version update resonator banner","category":"official","priority":56},
     {"id":"reddit-leaks","kind":"rss","url":"https://www.reddit.com/r/WutheringWavesLeaks/.rss?limit=50","category":"leak-community","priority":50},
-    {"id":"reddit-main","kind":"rss","url":"https://www.reddit.com/r/WutheringWaves/.rss?limit=50","category":"community","priority":48},
-    {"id":"wuwabanners","kind":"html","url":"https://wuwabanners.net/","category":"community","priority":75},
-    {"id":"countdown","kind":"html","url":"https://wuthering-countdown.gengamer.in/","category":"community","priority":70}
+    {"id":"reddit-main","kind":"rss","url":"https://www.reddit.com/r/WutheringWaves/.rss?limit=50","category":"community","priority":48}
   ]
 }
+

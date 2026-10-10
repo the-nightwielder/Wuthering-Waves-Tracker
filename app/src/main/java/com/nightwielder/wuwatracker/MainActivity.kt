@@ -5,6 +5,7 @@ import android.app.*
 import android.content.*
 import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
+import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -51,10 +52,15 @@ import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
+import java.io.File
+import java.io.FileOutputStream
+import java.io.ByteArrayOutputStream
+import java.security.MessageDigest
 import java.time.*
 import java.time.format.DateTimeFormatter
 import java.time.format.FormatStyle
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
 private val Context.dataStore by preferencesDataStore("wuwa_tracker")
@@ -199,12 +205,13 @@ private fun WuWaTrackerRoot() {
 }
 @Composable private fun EndgameScreen(state: UiState, now: Instant, modifier: Modifier) {
     ArtworkScreen(modifier,R.drawable.bg_endgame){LazyColumn(Modifier.fillMaxSize().padding(16.dp),verticalArrangement=Arrangement.spacedBy(12.dp)){
-        item{Text("Endgame",style=MaterialTheme.typography.headlineMedium,fontWeight=FontWeight.Bold)}
-        item{Text("Permanent and recurring content. Exact active phases should be verified in-game.")}
+        item{Text("Endgame",style=MaterialTheme.typography.headlineMedium,fontWeight=FontWeight.Bold,color=Color(0xFFF3E9FF))}
+        item{Text("Permanent and recurring content. Exact active phases should be verified in-game.",color=Color(0xFFE2DDEB))}
         items(state.events.filter{it.type.equals("Endgame",true)}){EventCard(it,now)}
     }}
 }
 @Composable private fun IntelScreen(state: UiState, now: Instant, syncing: Boolean, syncMessage: String, onRefresh: () -> Unit, onToggle:(String)->Unit, modifier: Modifier) {
+    val appContext=androidx.compose.ui.platform.LocalContext.current.applicationContext
     val groups=listOf(IntelGroup("Official Confirmations","OFFICIAL","No recent official updates for this version."),IntelGroup("Unconfirmed Leaks","LEAK","No recent version-relevant leak reports."),IntelGroup("Community Reports","COMMUNITY","No recent version-relevant community reports."))
     val version=state.version.takeIf{it!="Unknown"}?:"3.7"
     val feed=state.feedItems.filter{it.relevant(version,now)}.sortedByDescending{runCatching{Instant.parse(it.publishedAt)}.getOrDefault(Instant.EPOCH)}
@@ -212,17 +219,24 @@ private fun WuWaTrackerRoot() {
     fun oneCardPerPhase(rows:List<BannerIntel>)=rows.groupBy{"${it.version.orEmpty()}|${it.phase ?: 0}"}.values.mapNotNull{phaseRows->phaseRows.maxByOrNull{(if(it.weaponClaim.isNullOrBlank())0 else 100+it.weaponClaim.length)+(it.weaponImages.size*10)+(it.resonatorImages.size*5)+(if(it.sourceLabel.contains("WuWaBuild",true))25 else 0)}}
     val active=oneCardPerPhase(banners.filter{it.startAt!=null&&it.startAt<=now&&(it.endAt==null||it.endAt>now)}).sortedBy{it.phase}
     val upcoming=oneCardPerPhase(banners.filter{it.startAt?.isAfter(now)==true}).sortedBy{it.startAt}
+    fun cacheEnd(b:BannerIntel):Instant? {
+        b.endAt?.let{return it}
+        val laterPhase=state.banners.asSequence().filter{it.version==b.version&&it.phase!=null&&b.phase!=null&&it.phase>b.phase&&it.startAt!=null&&(b.startAt==null||it.startAt.isAfter(b.startAt))}.mapNotNull{it.startAt}.minOrNull()
+        if(laterPhase!=null)return laterPhase
+        return b.version?.let{version->state.banners.asSequence().filter{it.version!=null&&compareVersion(it.version,version)>0&&it.startAt!=null&&(b.startAt==null||it.startAt.isAfter(b.startAt))}.mapNotNull{it.startAt}.minOrNull()}
+    }
+    LaunchedEffect(state.banners){withContext(Dispatchers.IO){pruneArtworkCache(appContext)}}
     ArtworkScreen(modifier,R.drawable.bg_intel){LazyColumn(Modifier.fillMaxSize().padding(horizontal=16.dp,vertical=12.dp),verticalArrangement=Arrangement.spacedBy(10.dp)){
-        item{Text("Intelligence",style=MaterialTheme.typography.headlineMedium,fontWeight=FontWeight.Bold)}
+        item{Text("Intelligence",style=MaterialTheme.typography.headlineMedium,fontWeight=FontWeight.Bold,color=Color(0xFFF3E9FF))}
         item{InfoCard("Public intelligence feed",if(syncing)"Refreshing…" else feed.size.toString()+" recent reports · "+banners.size+" relevant banner claims",listOf(syncMessage.takeIf{it.isNotBlank()},state.lastSync.takeIf{it.isNotBlank()}?.let{"Last sync: "+it}).filterNotNull().joinToString(" · ").ifBlank{"Updated from free public sources."})}
         item{Button(onClick=onRefresh,enabled=!syncing,modifier=Modifier.fillMaxWidth()){Text(if(syncing)"Refreshing…" else "Refresh intelligence")}}
-        item{Text("Current version · "+version,style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.Bold)}
-        item{Text("Active Resonator / Weapon Banners",style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.SemiBold)}
+        item{Text("Current version · "+version,style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.Bold,color=Color(0xFFFFD994))}
+        item{Text("Active Resonator / Weapon Banners",style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.SemiBold,color=Color(0xFFE7DAFF))}
         if(active.isEmpty()) item{InfoCard("Live schedule","Banner details will appear here when the public feed refreshes.","No external site is needed to view the schedule.")}
-        items(active){b->BannerOverviewCard(b,true)}
-        item{Text("Upcoming Resonator / Weapon Banners",style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.SemiBold)}
+        items(active){b->BannerOverviewCard(b,true,cacheEnd(b)?.toEpochMilli()?:Long.MAX_VALUE)}
+        item{Text("Upcoming Resonator / Weapon Banners",style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.SemiBold,color=Color(0xFFBFE8E2))}
         if(upcoming.isEmpty()) item{InfoCard("Upcoming schedule","No upcoming schedule details are available in the feed right now.","Check again after the next feed refresh.")}
-        items(upcoming){b->BannerOverviewCard(b,false)}
+        items(upcoming){b->BannerOverviewCard(b,false,cacheEnd(b)?.toEpochMilli()?:Long.MAX_VALUE)}
         groups.forEach{g->
             val candidates=feed.filter{it.status.equals(g.status,true)&&(g.status!="LEAK"||it.isNextVersionLeak(version))}
             val rows=(if(g.status=="LEAK")candidates.distinctBy{it.leakDedupKey(version,state.resonators)}else candidates).take(12)
@@ -242,7 +256,7 @@ private fun WuWaTrackerRoot() {
 private data class IntelGroup(val title:String,val status:String,val emptyMessage:String)
 @Composable private fun SectionHeader(g:IntelGroup,closed:Boolean,toggle:()->Unit){Card(Modifier.fillMaxWidth().clickable(onClick=toggle),colors=CardDefaults.cardColors(containerColor=when(g.status){"OFFICIAL"->Color(0xFF263746);"LEAK"->Color(0xFF482D3C);else->Color(0xFF303044)})){Row(Modifier.fillMaxWidth().padding(horizontal=18.dp,vertical=12.dp),verticalAlignment=Alignment.CenterVertically){Column(Modifier.weight(1f)){Text(g.title,style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.Bold,color=Color.White);Text(if(closed)"Tap to expand" else g.status,style=MaterialTheme.typography.labelSmall,color=Color.LightGray)};ChevronControl(closed)}}}
 @Composable private fun ChevronControl(collapsed:Boolean){Box(Modifier.size(44.dp),contentAlignment=Alignment.Center){Canvas(Modifier.size(22.dp)){val stroke=2.5.dp.toPx();if(collapsed){drawLine(Color.White,androidx.compose.ui.geometry.Offset(size.width*.22f,size.height*.40f),androidx.compose.ui.geometry.Offset(size.width*.50f,size.height*.68f),strokeWidth=stroke,cap=StrokeCap.Round);drawLine(Color.White,androidx.compose.ui.geometry.Offset(size.width*.50f,size.height*.68f),androidx.compose.ui.geometry.Offset(size.width*.78f,size.height*.40f),strokeWidth=stroke,cap=StrokeCap.Round)}else{drawLine(Color.White,androidx.compose.ui.geometry.Offset(size.width*.22f,size.height*.60f),androidx.compose.ui.geometry.Offset(size.width*.50f,size.height*.32f),strokeWidth=stroke,cap=StrokeCap.Round);drawLine(Color.White,androidx.compose.ui.geometry.Offset(size.width*.50f,size.height*.32f),androidx.compose.ui.geometry.Offset(size.width*.78f,size.height*.60f),strokeWidth=stroke,cap=StrokeCap.Round)}}}}
-@Composable private fun BannerOverviewCard(b:BannerIntel,current:Boolean){
+@Composable private fun BannerOverviewCard(b:BannerIntel,current:Boolean,cacheExpiresAt:Long){
     var expanded by remember(b.title,current){mutableStateOf(false)}
     val names=b.title.split(Regex("\\s*,\\s*|\\s+and\\s+" )).map{it.trim()}.filter{it.isNotBlank()}.distinctBy{it.lowercase(Locale.ROOT)}.take(3)
     val feedWeapons=b.weaponClaim?.split(Regex("\\s*,\\s*|\\s+and\\s+|\\s*;\\s*"))?.map{it.trim()}?.filter{it.isNotBlank()}?.distinctBy{it.lowercase(Locale.ROOT)}.orEmpty()
@@ -251,32 +265,48 @@ private data class IntelGroup(val title:String,val status:String,val emptyMessag
     val usedFallback=mappedFallback.any{fallback->feedWeapons.none{it.equals(fallback,true)}}
     val weapons=(feedWeapons+mappedFallback).distinctBy{it.lowercase(Locale.ROOT)}.take(3)
     Card(Modifier.fillMaxWidth(),colors=CardDefaults.cardColors(containerColor=if(current)Color(0xFF292438) else Color(0xFF26323C))){Column(Modifier.padding(16.dp),verticalArrangement=Arrangement.spacedBy(9.dp)){
-        Row(Modifier.fillMaxWidth().clickable{expanded=!expanded},verticalAlignment=Alignment.CenterVertically){val lead=names.firstOrNull().orEmpty();if(!expanded){ResonatorArtwork(lead,b.resonatorImages.artworkFor(lead));Column(Modifier.weight(1f).padding(start=12.dp)){Text(if(current)"ACTIVE BANNER" else "UPCOMING BANNER",style=MaterialTheme.typography.labelLarge,color=MaterialTheme.colorScheme.primary);Text(lead.ifBlank{b.title},style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.Bold);Text(listOfNotNull(b.version?.let{"Version $it"},b.phase?.let{phaseLabel(it)},b.startAt?.let{(if(current)"From " else "Starts ")+dateOnly(it)},b.endAt?.let{"Until "+dateOnly(it)}).joinToString(" · "),style=MaterialTheme.typography.bodySmall)}}else{Column(Modifier.weight(1f)){Text(if(current)"ACTIVE BANNER DETAILS" else "UPCOMING BANNER DETAILS",style=MaterialTheme.typography.labelLarge,color=MaterialTheme.colorScheme.primary);Text(listOfNotNull(b.version?.let{"Version $it"},b.phase?.let{phaseLabel(it)},b.startAt?.let{dateOnly(it)},b.endAt?.let{"Until "+dateOnly(it)}).joinToString(" · "),style=MaterialTheme.typography.bodySmall)}};ChevronControl(!expanded)}
+        Row(Modifier.fillMaxWidth().clickable{expanded=!expanded},verticalAlignment=Alignment.CenterVertically){val lead=names.firstOrNull().orEmpty();if(!expanded){ResonatorArtwork(lead,b.resonatorImages.artworkFor(lead),current,cacheExpiresAt);Column(Modifier.weight(1f).padding(start=12.dp)){Text(if(current)"ACTIVE BANNER" else "UPCOMING BANNER",style=MaterialTheme.typography.labelLarge,color=MaterialTheme.colorScheme.primary);Text(lead.ifBlank{b.title},style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.Bold);Text(listOfNotNull(b.version?.let{"Version $it"},b.phase?.let{phaseLabel(it)},b.startAt?.let{(if(current)"From " else "Starts ")+dateOnly(it)},b.endAt?.let{"Until "+dateOnly(it)}).joinToString(" · "),style=MaterialTheme.typography.bodySmall)}}else{Column(Modifier.weight(1f)){Text(if(current)"ACTIVE BANNER DETAILS" else "UPCOMING BANNER DETAILS",style=MaterialTheme.typography.labelLarge,color=MaterialTheme.colorScheme.primary);Text(listOfNotNull(b.version?.let{"Version $it"},b.phase?.let{phaseLabel(it)},b.startAt?.let{dateOnly(it)},b.endAt?.let{"Until "+dateOnly(it)}).joinToString(" · "),style=MaterialTheme.typography.bodySmall)}};ChevronControl(!expanded)}
         if(expanded){
             Text("Resonators",style=MaterialTheme.typography.titleSmall,fontWeight=FontWeight.Bold)
             names.forEachIndexed{index,name->
-                Row(Modifier.fillMaxWidth().padding(vertical=5.dp),horizontalArrangement=Arrangement.spacedBy(12.dp),verticalAlignment=Alignment.CenterVertically){ResonatorArtwork(name,b.resonatorImages.artworkFor(name));Column{Text(name,fontWeight=FontWeight.SemiBold,color=Color.White);Text(listOfNotNull(b.phase?.let{phaseLabel(it)},b.startAt?.let{dateOnly(it)},b.endAt?.let{"until "+dateOnly(it)}).joinToString(" · ").ifBlank{"Dates not provided by source"},style=MaterialTheme.typography.bodySmall,color=Color.LightGray)}}
+                Row(Modifier.fillMaxWidth().padding(vertical=5.dp),horizontalArrangement=Arrangement.spacedBy(12.dp),verticalAlignment=Alignment.CenterVertically){ResonatorArtwork(name,b.resonatorImages.artworkFor(name),current,cacheExpiresAt);Column{Text(name,fontWeight=FontWeight.SemiBold,color=Color.White);Text(listOfNotNull(b.phase?.let{phaseLabel(it)},b.startAt?.let{dateOnly(it)},b.endAt?.let{"until "+dateOnly(it)}).joinToString(" · ").ifBlank{"Dates not provided by source"},style=MaterialTheme.typography.bodySmall,color=Color.LightGray)}}
             }
             HorizontalDivider()
             Text("Weapons",style=MaterialTheme.typography.titleSmall,fontWeight=FontWeight.Bold)
-            if(weapons.isEmpty())Text("Weapon names will appear after the updated schedule feed is published.",style=MaterialTheme.typography.bodySmall,color=Color.LightGray) else weapons.forEach{name->Row(Modifier.fillMaxWidth().padding(vertical=5.dp),horizontalArrangement=Arrangement.spacedBy(12.dp),verticalAlignment=Alignment.CenterVertically){val artwork=b.weaponImages[name]?:weaponArtworkFallback(b.version,name);WeaponArtwork(name,artwork);Column{Text(name,fontWeight=FontWeight.SemiBold);Text("${b.version?.let{"Version $it · "}.orEmpty()}${b.phase?.let{"Phase $it · "}.orEmpty()}${b.startAt?.let{dateOnly(it)}?:"Schedule date unavailable"}",style=MaterialTheme.typography.bodySmall)}}}
+            if(weapons.isEmpty())Text("Weapon names will appear after the updated schedule feed is published.",style=MaterialTheme.typography.bodySmall,color=Color.LightGray) else weapons.forEach{name->Row(Modifier.fillMaxWidth().padding(vertical=5.dp),horizontalArrangement=Arrangement.spacedBy(12.dp),verticalAlignment=Alignment.CenterVertically){WeaponArtwork(name,b.weaponImages[name],current,cacheExpiresAt);Column{Text(name,fontWeight=FontWeight.SemiBold);Text("${b.version?.let{"Version $it · "}.orEmpty()}${b.phase?.let{"Phase $it · "}.orEmpty()}${b.startAt?.let{dateOnly(it)}?:"Schedule date unavailable"}",style=MaterialTheme.typography.bodySmall)}}}
             if(usedFallback)Text("Weapon pairings are community schedule references.",style=MaterialTheme.typography.labelSmall,color=Color.LightGray)
             Text("Verify exact server timing in-game.",style=MaterialTheme.typography.labelSmall,color=Color.LightGray)
         }
     }}
 }
-@Composable private fun ArtworkInitial(name:String){Box(Modifier.size(68.dp).clip(CircleShape).background(Color(0xFF393441)),contentAlignment=Alignment.Center){Text(name.take(1).uppercase(),style=MaterialTheme.typography.headlineMedium,color=Color.White)}}
+@Composable private fun ArtworkInitial(name:String,weapon:Boolean=false){Box(Modifier.size(68.dp).clip(if(weapon)RoundedCornerShape(12.dp)else CircleShape).background(Color(0xFF393441)),contentAlignment=Alignment.Center){Text(name.take(1).uppercase(),style=MaterialTheme.typography.headlineMedium,color=Color.White)}}
 private fun Map<String,String>.artworkFor(name:String):String?=entries.firstOrNull{it.key.equals(name,true)}?.value
-@Composable private fun ResonatorArtwork(name:String,url:String?){RemoteArtwork(url,name)}
-private data class ArtworkFocus(val x:Float,val y:Float,val width:Float)
-private fun weaponArtworkFallback(version:String?,name:String):String?=if(version!="3.7")null else mapOf(
-    "unspoken rue" to "https://wuthering-countdown.gengamer.in/wp-content/uploads/Picsart_26-09-30_17-52-43-907.webp",
-    "spectrum blaster" to "https://wuthering-countdown.gengamer.in/wp-content/uploads/Picsart_26-09-30_17-52-50-888.webp",
-    "freeze frame" to "https://wuthering-countdown.gengamer.in/wp-content/uploads/Picsart_26-09-30_17-52-59-040.webp"
-)[name.trim().lowercase(Locale.ROOT)]
-private fun fandomResonatorIcon(name:String):String?=runCatching{val title=URLEncoder.encode("File:Resonator $name.png","UTF-8");val api=URL("https://wutheringwaves.fandom.com/api.php?action=query&titles=$title&prop=imageinfo&iiprop=url&iiurlwidth=512&format=json");val json=api.openConnection().apply{connectTimeout=7000;readTimeout=7000;setRequestProperty("User-Agent","WuWaTracker/1.3 (Android)")}.getInputStream().bufferedReader().use{it.readText()};val pages=JSONObject(json).getJSONObject("query").getJSONObject("pages");val keys=pages.keys();if(!keys.hasNext())null else pages.getJSONObject(keys.next()).optJSONArray("imageinfo")?.optJSONObject(0)?.optString("thumburl")?.takeIf{it.startsWith("https://")}}.getOrNull()
-@Composable private fun WeaponArtwork(name:String,url:String?){var image by remember(name,url){mutableStateOf<ImageBitmap?>(null)};LaunchedEffect(name,url){image=withContext(Dispatchers.IO){runCatching{val imageUrl=url?:run{val query=URLEncoder.encode(name,"UTF-8");val api=URL("https://wutheringwaves.fandom.com/api.php?action=query&titles=$query&prop=pageimages&format=json&pithumbsize=640");val json=api.openConnection().apply{connectTimeout=7000;readTimeout=7000}.getInputStream().bufferedReader().use{it.readText()};val pages=JSONObject(json).getJSONObject("query").getJSONObject("pages");val keys=pages.keys();if(!keys.hasNext())"" else pages.getJSONObject(keys.next()).optJSONObject("thumbnail")?.optString("source").orEmpty()};if(!imageUrl.startsWith("https://"))return@runCatching null;URL(imageUrl).openConnection().apply{useCaches=false;connectTimeout=8000;readTimeout=8000;setRequestProperty("Cache-Control","no-cache")}.getInputStream().use{stream->BitmapFactory.decodeStream(stream)?.let{bitmap->val side=(minOf(bitmap.width,bitmap.height)*.72f).toInt().coerceAtLeast(1);val left=(bitmap.width-side)/2;val top=(bitmap.height-side)/2;android.graphics.Bitmap.createBitmap(bitmap,left,top,side,side).asImageBitmap()}}}.getOrNull()}};if(image!=null)Image(image!!,name,contentScale=ContentScale.Crop,modifier=Modifier.size(68.dp).clip(RoundedCornerShape(12.dp)))else ArtworkInitial(name)}
-@Composable private fun RemoteArtwork(url:String?,description:String,weapon:Boolean=false){val focus=ArtworkFocus(.5f,.5f,.96f);var image by remember(url,description,weapon){mutableStateOf<ImageBitmap?>(null)};LaunchedEffect(url,description,weapon){image=withContext(Dispatchers.IO){runCatching{val imageUrl=(if(!weapon)fandomResonatorIcon(description)else null)?:url?:return@runCatching null;require(imageUrl.startsWith("https://"));URL(imageUrl).openConnection().apply{useCaches=false;connectTimeout=8000;readTimeout=8000;setRequestProperty("Cache-Control","no-cache")}.getInputStream().use{stream->BitmapFactory.decodeStream(stream)?.let{bitmap->val side=(minOf(bitmap.width,bitmap.height)*focus.width).toInt().coerceAtLeast(1);val left=((bitmap.width-side)/2).coerceIn(0,bitmap.width-side);val top=((bitmap.height-side)/2).coerceIn(0,bitmap.height-side);android.graphics.Bitmap.createBitmap(bitmap,left,top,side,side).asImageBitmap()}}}.getOrNull()}};if(image!=null)Image(image!!,description,contentScale=ContentScale.Crop,modifier=Modifier.size(68.dp).clip(if(weapon)RoundedCornerShape(12.dp)else CircleShape))else if(description.equals("Hsin",true))Image(painterResource(R.drawable.hsin_portrait),description,contentScale=ContentScale.Crop,modifier=Modifier.size(68.dp).clip(CircleShape))else ArtworkInitial(description)}
+@Composable private fun ResonatorArtwork(name:String,url:String?,active:Boolean,expiresAt:Long){RemoteArtwork(url,name,active,expiresAt)}
+private data class CachedArtUrl(val url:String?,val cachedAt:Long)
+private val fandomArtUrlCache=ConcurrentHashMap<String,CachedArtUrl>()
+private const val ART_CACHE_TTL_MS=6*60*60*1000L
+private const val ART_MAX_BYTES=5*1024*1024
+private fun isFandomArtUrl(value:String?):Boolean=runCatching{val u=URL(value);u.protocol=="https"&&(u.host=="fandom.com"||u.host.endsWith(".fandom.com")||u.host.endsWith(".wikia.nocookie.net")||u.host.endsWith(".wikia.com"))}.getOrDefault(false)
+private fun isGenGamerArtUrl(value:String?):Boolean=runCatching{val u=URL(value);u.protocol=="https"&&(u.host=="gengamer.in"||u.host.endsWith(".gengamer.in"))}.getOrDefault(false)
+private fun fandomPageImage(name:String,kind:String):String?{
+    val key="$kind:${name.trim().lowercase(Locale.ROOT)}";val now=System.currentTimeMillis()
+    fandomArtUrlCache[key]?.takeIf{now-it.cachedAt<(if(it.url==null)5*60*1000L else ART_CACHE_TTL_MS)}?.let{return it.url}
+    val image=runCatching{val query=URLEncoder.encode(name,"UTF-8");val api=URL("https://wutheringwaves.fandom.com/api.php?action=query&titles=$query&prop=pageimages&format=json&pithumbsize=640&redirects=1");val conn=api.openConnection().apply{useCaches=false;connectTimeout=7000;readTimeout=7000;setRequestProperty("Cache-Control","no-cache");setRequestProperty("User-Agent","WuWaTracker/1.0 (Android)")};val json=conn.getInputStream().bufferedReader().use{it.readText()};val pages=JSONObject(json).getJSONObject("query").getJSONObject("pages");val keys=pages.keys();if(!keys.hasNext())null else pages.getJSONObject(keys.next()).optJSONObject("thumbnail")?.optString("source")?.takeIf(::isFandomArtUrl)}.getOrNull()
+    fandomArtUrlCache[key]=CachedArtUrl(image,now);return image
+}
+private fun artworkFile(context:Context,identity:String,url:String):File{val digest=MessageDigest.getInstance("SHA-256").digest("$identity|$url".toByteArray()).joinToString(""){"%02x".format(it)};return File(File(context.cacheDir,"banner-artwork"),digest+".img")}
+private fun pruneArtworkCache(context:Context){val dir=File(context.cacheDir,"banner-artwork");val files=dir.listFiles()?:return;val now=System.currentTimeMillis();files.filter{it.name.endsWith(".img")}.forEach{file->val expiryFile=File(dir,file.name+".expiry");val expiry=expiryFile.takeIf{it.isFile}?.readText()?.toLongOrNull()?:0L;if(expiry!=Long.MAX_VALUE&&expiry<=now){file.delete();expiryFile.delete()}};dir.listFiles()?.filter{it.name.endsWith(".tmp")&&now-it.lastModified()>24*60*60*1000L}?.forEach{it.delete()}}
+private fun loadArtwork(context:Context,identity:String,url:String,crop:Float,expiresAt:Long):ImageBitmap?=runCatching{
+    val file=artworkFile(context,identity,url);val expiryFile=File(file.parentFile,file.name+".expiry");val now=System.currentTimeMillis()
+    val storedExpiry=expiryFile.takeIf{it.isFile}?.readText()?.toLongOrNull()?:0L
+    var bitmap:Bitmap?=if(file.isFile&&storedExpiry!=0L&&(storedExpiry==Long.MAX_VALUE||now<storedExpiry))BitmapFactory.decodeFile(file.absolutePath)else null
+    if(bitmap==null){file.delete();expiryFile.delete();val connection=(URL(url).openConnection() as HttpURLConnection).apply{useCaches=false;instanceFollowRedirects=true;connectTimeout=8000;readTimeout=10000;setRequestProperty("Cache-Control","no-cache");setRequestProperty("User-Agent","WuWaTracker/1.0 (Android)")}
+        try{if(connection.responseCode !in 200..299)throw IllegalStateException("Artwork request failed");if(connection.contentLengthLong>ART_MAX_BYTES)throw IllegalStateException("Artwork is too large");val bytes=connection.inputStream.use{input->val output=ByteArrayOutputStream();val buffer=ByteArray(8192);var total=0;while(true){val count=input.read(buffer);if(count<0)break;total+=count;if(total>ART_MAX_BYTES)throw IllegalStateException("Artwork is too large");output.write(buffer,0,count)};output.toByteArray()};bitmap=BitmapFactory.decodeByteArray(bytes,0,bytes.size)?:throw IllegalStateException("Unsupported artwork");file.parentFile?.mkdirs();val temp=File(file.parentFile,file.name+"."+Thread.currentThread().id+".tmp");FileOutputStream(temp).use{it.write(bytes)};if(temp.renameTo(file)){file.setLastModified(now);expiryFile.writeText(expiresAt.toString())}else temp.delete()}finally{connection.disconnect()}
+    }
+    bitmap?.let{source->val side=(minOf(source.width,source.height)*crop).toInt().coerceAtLeast(1);val left=((source.width-side)/2).coerceIn(0,source.width-side);val top=((source.height-side)/2).coerceIn(0,source.height-side);Bitmap.createBitmap(source,left,top,side,side).asImageBitmap()}
+}.getOrNull()
+@Composable private fun WeaponArtwork(name:String,url:String?,active:Boolean,expiresAt:Long){val context=androidx.compose.ui.platform.LocalContext.current.applicationContext;var image by remember(name,url,active,expiresAt){mutableStateOf<ImageBitmap?>(null)};LaunchedEffect(name,url,active,expiresAt){image=withContext(Dispatchers.IO){val source=if(active){url?.takeIf(::isFandomArtUrl)?:fandomPageImage(name,"weapon")}else url?.takeIf(::isGenGamerArtUrl);source?.let{loadArtwork(context,"weapon:${name.trim().lowercase(Locale.ROOT)}",it,.72f,expiresAt)}}};if(image!=null)Image(image!!,name,contentScale=ContentScale.Crop,modifier=Modifier.size(68.dp).clip(RoundedCornerShape(12.dp)))else ArtworkInitial(name,true)}
+@Composable private fun RemoteArtwork(url:String?,description:String,active:Boolean,expiresAt:Long){val context=androidx.compose.ui.platform.LocalContext.current.applicationContext;var image by remember(url,description,active,expiresAt){mutableStateOf<ImageBitmap?>(null)};LaunchedEffect(url,description,active,expiresAt){image=withContext(Dispatchers.IO){val source=if(active){url?.takeIf(::isFandomArtUrl)?:fandomPageImage(description,"resonator")}else url?.takeIf(::isGenGamerArtUrl);source?.let{loadArtwork(context,"resonator:${description.trim().lowercase(Locale.ROOT)}",it,.96f,expiresAt)}}};if(image!=null)Image(image!!,description,contentScale=ContentScale.Crop,modifier=Modifier.size(68.dp).clip(CircleShape))else ArtworkInitial(description)}
 @Composable private fun SourceLinkCard(title:String,body:String,url:String){Card(Modifier.fillMaxWidth().clickable{openUrl(url)}){Column(Modifier.padding(16.dp),verticalArrangement=Arrangement.spacedBy(5.dp)){Text(title,fontWeight=FontWeight.SemiBold);Text(body,style=MaterialTheme.typography.bodySmall);Text("Open source ↗",color=MaterialTheme.colorScheme.primary)}}}
 private fun dateOnly(i:Instant)=DateTimeFormatter.ofPattern("MMM d, yyyy",Locale.getDefault()).withZone(ZoneId.systemDefault()).format(i)
 private fun phaseLabel(phase:Int?):String?=when(phase){1->"Phase I";2->"Phase II";3->"Phase III";4->"Phase IV";else->null}
@@ -311,15 +341,15 @@ private fun FeedItem.relevant(version:String,now:Instant):Boolean{val mentions=R
     val options = listOf(0 to "At reset", 15 to "15 minutes before", 30 to "30 minutes before", 60 to "1 hour before", -1 to "Custom date & time")
     ArtworkScreen(modifier,R.drawable.bg_settings) {
     LazyColumn(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        item { Text("Settings", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold) }
+        item { Text("Settings", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold, color = Color(0xFFF3E9FF)) }
         item { ExposedDropdownMenuBox(serverExpanded, { serverExpanded = !serverExpanded }) { OutlinedTextField(state.server.label, {}, readOnly = true, label = { Text("Game server") }, modifier = Modifier.menuAnchor().fillMaxWidth()); ExposedDropdownMenu(serverExpanded, { serverExpanded = false }) { Server.entries.forEach { s -> DropdownMenuItem(text = { Text(s.label) }, onClick = { update { it.copy(server = s, serverSelected = true) }; serverExpanded = false }) } } } }
         item { Text("Reset timezone: ${ZoneId.of(state.server.zone)}") }
         item { Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) { Column(Modifier.weight(1f)) { Text("Enable reset reminder"); Text("Scheduled from server reset, displayed in local time.") }; Switch(state.reminderEnabled, { checked -> update { it.copy(reminderEnabled = checked) } }) } }
         item { ExposedDropdownMenuBox(leadExpanded, { leadExpanded = !leadExpanded }) { OutlinedTextField(options.first { it.first == state.reminderLead }.second, {}, readOnly = true, label = { Text("Reminder timing") }, modifier = Modifier.menuAnchor().fillMaxWidth()); ExposedDropdownMenu(leadExpanded, { leadExpanded = false }) { options.forEach { (v, label) -> DropdownMenuItem(text = { Text(label) }, onClick = { update { it.copy(reminderLead = v) }; leadExpanded = false; if (v == -1) showCustomReminderPicker(context) { selected -> update { it.copy(customReminderAt = selected) } } }) } } } }
         if (state.reminderLead == -1) item { TextButton(onClick = { showCustomReminderPicker(context) { selected -> update { it.copy(customReminderAt = selected) } } }) { Text(state.customReminderAt?.let { "Custom reminder: ${DateTimeFormatter.ofLocalizedDateTime(FormatStyle.MEDIUM).withZone(ZoneId.systemDefault()).format(it)}" } ?: "Choose reminder date and time") } }
-        item { Text("Internet intelligence", style = MaterialTheme.typography.titleLarge) }
+        item { Text("Internet Intelligence", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold, color = Color(0xFFFFD994)) }
         item { InfoCard("Live intelligence", GITHUB_FEED_URL, "Sources include official notices, Reddit leaks, WuWa Banners, GenGamer, u7buy and LDShop. Leaks stay unconfirmed.") }
-        item { Text("Security", style = MaterialTheme.typography.titleLarge) }
+        item { Text("Security", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold, color = Color(0xFFBFE8E2)) }
         item { InfoCard("Local-first", "No game login, password, cookies or account tokens are collected.", "Only the configured HTTPS feed is requested by the app.") }
         item { InfoCard("Leak safety", "Leaks remain clearly marked as unconfirmed.", "Check the linked source before treating a claim as confirmed.") }
     }

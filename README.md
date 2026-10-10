@@ -11,7 +11,7 @@ Public sources
   ├─ public X pages indexed by Google News RSS
   └─ Reddit RSS
           ↓
-GitHub Actions (every 30 min)
+GitHub Actions (daily, with manual refresh available)
           ↓
 Python intelligence pipeline
   ├─ normalization

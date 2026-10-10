@@ -51,7 +51,7 @@ python aggregator.py
 
 ## GitHub deployment
 
-The repository workflow runs every 30 minutes and can also be started manually. It:
+The repository workflow runs daily and can also be started manually. It:
 
 1. fetches sources;
 2. extracts and correlates entities;

@@ -77,7 +77,7 @@ enum class Server(val label: String, val zone: String) {
 }
 
 data class TrackerEvent(val title: String, val type: String, val start: Instant, val end: Instant?, val note: String, val sourceUrl: String = "", val status: String = "COMMUNITY", val confidence: Double = 0.0)
-data class FeedItem(val title: String, val url: String, val summary: String, val status: String, val source: String, val publishedAt: String, val confidence: Double)
+data class FeedItem(val title: String, val url: String, val summary: String, val status: String, val source: String, val publishedAt: String, val confidence: Double, val targetVersion: String? = null)
 data class VersionIntel(val version: String, val status: String, val confidence: Double, val sourceUrls: List<String>)
 data class BannerIntel(val title: String, val version: String?, val phase: Int?, val startAt: Instant?, val endAt: Instant?, val status: String, val confidence: Double, val sourceUrls: List<String>, val sourceLabel: String = "Website", val weaponClaim: String? = null, val resonatorImages: Map<String,String> = emptyMap(), val weaponImages: Map<String,String> = emptyMap())
 data class ResonatorIntel(val name: String, val version: String?, val phase: Int?, val element: String?, val weapon: String?, val status: String, val confidence: Double, val sourceUrls: List<String>, val sourceLabel: String = "Website", val weaponClaim: String? = null)
@@ -391,6 +391,7 @@ private fun FeedItem.isNextVersionLeak(currentVersion:String):Boolean {
     if(versions.isEmpty()&&Regex("(?i)wuthering\\s+waves|\\bwuwa\\b").containsMatchIn(text))versions+=Regex("\\b(\\d+\\.\\d+)\\b").findAll(text).map{it.groupValues[1]}.toList()
     val parts=Regex("\\d+\\.\\d+").find(currentVersion)?.value?.split(".")?.mapNotNull{it.toIntOrNull()}?:return false
     val next="${parts.getOrElse(0){0}}.${parts.getOrElse(1){0}+1}"
+    if(targetVersion!=null)return targetVersion==next
     if(versions.isNotEmpty())return versions.any{compareVersion(it,next)==0}
     return Regex("(?i)\\b(?:next\\s+(?:version|patch|update|resonator)|upcoming\\s+(?:version|resonator|banner)|beta\\s+(?:for|of)\\s+(?:the\\s+)?next\\s+(?:version|patch))\\b").containsMatchIn(text)
 }
@@ -404,7 +405,13 @@ private fun FeedItem.leakDedupKey(currentVersion:String,resonators:List<Resonato
     return "$publisher|$nextVersion|$topic"
 }
 private fun compareVersion(a:String,b:String):Int{val x=Regex("\\d+\\.\\d+").find(a)?.value?.split(".")?.map{it.toInt()}?:return 0;val y=Regex("\\d+\\.\\d+").find(b)?.value?.split(".")?.map{it.toInt()}?:return 0;for(i in 0 until maxOf(x.size,y.size)){val n=x.getOrElse(i){0}.compareTo(y.getOrElse(i){0});if(n!=0)return n};return 0}
-private fun FeedItem.relevant(version:String,now:Instant):Boolean{val mentions=Regex("(?i)(?:(?:version|ver\\.?|wuthering\\s+waves)\\s*|\\bv\\s*)(\\d+\\.\\d+)").findAll(title+" "+summary).map{it.groupValues[1]}.toList();if(mentions.any{compareVersion(it,version)<0}&&mentions.none{compareVersion(it,version)>=0})return false;val date=runCatching{Instant.parse(publishedAt)}.getOrNull()?:return mentions.any{compareVersion(it,version)>=0};return mentions.any{compareVersion(it,version)>=0}||Duration.between(date,now).abs()<=Duration.ofDays(60)}
+private fun FeedItem.relevant(version:String,now:Instant):Boolean {
+    val mentions=Regex("(?i)(?:(?:version|ver\\.?|wuthering\\s+waves)\\s*|\\bv\\s*)(\\d+\\.\\d+)").findAll(title+" "+summary).map{it.groupValues[1]}.toList()
+    val targetIsCurrentOrNewer=targetVersion?.takeIf{Regex("\\d+\\.\\d+").matches(it)}?.let{compareVersion(it,version)>=0}==true
+    if(mentions.any{compareVersion(it,version)<0}&&mentions.none{compareVersion(it,version)>=0}&&!targetIsCurrentOrNewer)return false
+    val date=runCatching{Instant.parse(publishedAt)}.getOrNull()?:return targetIsCurrentOrNewer||mentions.any{compareVersion(it,version)>=0}
+    return targetIsCurrentOrNewer||mentions.any{compareVersion(it,version)>=0}||Duration.between(date,now).abs()<=Duration.ofDays(60)
+}
 
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -459,7 +466,7 @@ private suspend fun loadState(context: Context): UiState {
     val key = resetKey(server)
     val stored = p[stringPreferencesKey("reset_key")]
     val raw = p[stringPreferencesKey("cached_feed")]
-    val f = parseFeed(raw)
+    val f = runCatching { parseFeed(raw) }.getOrDefault(FeedResult(emptyList(), emptyList(), emptyList(), emptyList(), emptyList(), null))
     return UiState(
         server = server,
         dailyDone = if (stored == key) (p[booleanPreferencesKey("daily")] ?: false) else false,
@@ -488,14 +495,37 @@ private suspend fun saveState(context: Context, state: UiState) { context.dataSt
 } }
 
 private fun stateToJson(state: UiState) = JSONObject().apply {
-    put("latestVersion", state.version); put("news", JSONArray().apply { state.feedItems.forEach { put(JSONObject().apply { put("title",it.title); put("url",it.url); put("summary",it.summary); put("status",it.status); put("sourceLabel",it.source); put("publishedAt",it.publishedAt); put("confidence",it.confidence) }) } })
+    put("latestVersion", state.version); put("news", JSONArray().apply { state.feedItems.forEach { put(JSONObject().apply { put("title",it.title); put("url",it.url); put("summary",it.summary); put("status",it.status); put("sourceLabel",it.source); put("publishedAt",it.publishedAt); put("confidence",it.confidence); if (it.targetVersion != null) put("targetVersion",it.targetVersion) }) } })
     put("events", JSONArray().apply { state.events.filter { it.start != Instant.EPOCH }.forEach { put(JSONObject().apply { put("title",it.title); put("type",it.type); put("startAt",it.start.toString()); if (it.end != null) put("endAt",it.end.toString()); put("note",it.note); put("sourceUrl",it.sourceUrl); put("status",it.status); put("confidence",it.confidence) }) } })
     put("versions", JSONArray().apply { state.versions.forEach { put(JSONObject().apply { put("version",it.version); put("status",it.status); put("confidence",it.confidence); put("sourceUrls",JSONArray(it.sourceUrls)) }) } })
     put("banners", JSONArray().apply { state.banners.forEach { put(JSONObject().apply { put("title",it.title); put("version",it.version); put("phase",it.phase); put("startAt",it.startAt?.toString()); put("endAt",it.endAt?.toString()); put("status",it.status); put("confidence",it.confidence); put("sourceLabel",it.sourceLabel); put("weapon",it.weaponClaim); put("resonatorImages",JSONObject(it.resonatorImages)); put("weaponImages",JSONObject(it.weaponImages)); put("sourceUrls",JSONArray(it.sourceUrls)) }) } })
     put("resonators", JSONArray().apply { state.resonators.forEach { put(JSONObject().apply { put("name",it.name); put("version",it.version); put("phase",it.phase); put("element",it.element); put("weapon",it.weapon); put("status",it.status); put("confidence",it.confidence); put("sourceUrls",JSONArray(it.sourceUrls)) }) } })
 }
 
-private fun parseFeed(raw: String?): FeedResult { if (raw.isNullOrBlank()||raw.length>MAX_FEED_BYTES) return FeedResult(emptyList(), emptyList(), emptyList(), emptyList(), emptyList(), null); return runCatching { val root=JSONObject(raw); val fieldNames=root.keys(); while(fieldNames.hasNext()){val value=root.opt(fieldNames.next());if(value is JSONArray&&value.length()>MAX_FEED_ARRAY_ITEMS)error("Feed contains too many records")}; val bannerRows=parseBanners(root.optJSONArray("scheduleSnapshots") ?: JSONArray()) + parseBanners(root.optJSONArray("banners") ?: JSONArray()) + parseBanners(root.optJSONArray("activeBanners") ?: JSONArray()) + parseBanners(root.optJSONArray("upcomingBanners") ?: JSONArray()); val banners=bannerRows.groupBy { it.title.lowercase(Locale.ROOT)+it.version+it.phase }.values.mapNotNull { rows -> rows.maxByOrNull { (if(it.weaponClaim.isNullOrBlank())0 else 10+it.weaponClaim.length)+it.weaponImages.size*3+it.resonatorImages.size } }; FeedResult(parseNews(root.optJSONArray("news") ?: root.optJSONArray("items") ?: JSONArray()), parseEvents(root.optJSONArray("events") ?: JSONArray()), parseVersions(root.optJSONArray("versions") ?: JSONArray()), banners, parseResonators(root.optJSONArray("resonators") ?: JSONArray()), root.optString("latestVersion").takeIf { it.isNotBlank() } ?: root.optString("version").takeIf { it.isNotBlank() }) }.getOrDefault(FeedResult(emptyList(),emptyList(),emptyList(),emptyList(),emptyList(),null)) }
+private fun parseFeed(raw: String?): FeedResult {
+    require(!raw.isNullOrBlank()) { "Feed is empty" }
+    require(raw.length <= MAX_FEED_BYTES) { "Feed is too large" }
+    val root = try { JSONObject(raw) } catch (error: Exception) { throw IllegalArgumentException("Feed JSON is invalid", error) }
+    val fieldNames = root.keys()
+    while (fieldNames.hasNext()) {
+        val value = root.opt(fieldNames.next())
+        require(value !is JSONArray || value.length() <= MAX_FEED_ARRAY_ITEMS) { "Feed contains too many records" }
+    }
+    val bannerRows = parseBanners(root.optJSONArray("scheduleSnapshots") ?: JSONArray()) +
+        parseBanners(root.optJSONArray("banners") ?: JSONArray()) +
+        parseBanners(root.optJSONArray("activeBanners") ?: JSONArray()) +
+        parseBanners(root.optJSONArray("upcomingBanners") ?: JSONArray())
+    val banners = bannerRows.groupBy { it.title.lowercase(Locale.ROOT) + it.version + it.phase }
+        .values.mapNotNull { rows -> rows.maxByOrNull { (if (it.weaponClaim.isNullOrBlank()) 0 else 10 + it.weaponClaim.length) + it.weaponImages.size * 3 + it.resonatorImages.size } }
+    return FeedResult(
+        parseNews(root.optJSONArray("news") ?: root.optJSONArray("items") ?: JSONArray()),
+        parseEvents(root.optJSONArray("events") ?: JSONArray()),
+        parseVersions(root.optJSONArray("versions") ?: JSONArray()),
+        banners,
+        parseResonators(root.optJSONArray("resonators") ?: JSONArray()),
+        root.optString("latestVersion").takeIf { it.isNotBlank() } ?: root.optString("version").takeIf { it.isNotBlank() }
+    )
+}
 private fun sourceLabel(type: String, name: String, id: String): String = when {
     type.startsWith("X") -> if (name.isNotBlank() && name != id) "X · $name" else "X (indexed)"
     type == "Reddit" -> if (name.isNotBlank() && name != id) "Reddit · $name" else "Reddit"
@@ -515,7 +545,7 @@ private fun parseNews(a: JSONArray): List<FeedItem> = buildList {
         val id = o.optString("sourceId", "unknown")
         val storedLabel = o.optString("sourceLabel")
         val source = storedLabel.takeIf { it.isNotBlank() } ?: sourceLabel(o.optString("sourceType"), o.optString("sourceName"), id)
-        add(FeedItem(o.optString("title"), o.optString("url"), o.optString("summary"), o.optString("status", "COMMUNITY"), source, o.optString("publishedAt"), o.optDouble("confidence", 0.0)))
+        add(FeedItem(o.optString("title"), o.optString("url"), o.optString("summary"), o.optString("status", "COMMUNITY"), source, o.optString("publishedAt"), o.optDouble("confidence", 0.0), o.optString("targetVersion").takeIf { it.isNotBlank() && it != "null" }))
     }
 }
 private fun parseEvents(a: JSONArray): List<TrackerEvent> = buildList { for(i in 0 until a.length()){ val o=a.optJSONObject(i)?:continue; val start=runCatching{Instant.parse(o.optString("startAt",o.optString("start")))}.getOrNull()?:continue; val end=runCatching{Instant.parse(o.optString("endAt",o.optString("end")))}.getOrNull(); add(TrackerEvent(o.optString("title"),o.optString("type","Event"),start,end,o.optString("note","Source-derived event; verify exact timing in-game."),o.optString("sourceUrl"),o.optString("status","COMMUNITY"),o.optDouble("confidence",0.0))) } }
@@ -598,7 +628,7 @@ class FeedSyncWorker(appContext: Context, params: WorkerParameters):CoroutineWor
             applicationContext.dataStore.edit{
                 it[stringPreferencesKey("cached_feed")]=JSONObject().apply{
                     put("latestVersion",f.latestVersion);
-                    put("news",JSONArray().apply{f.items.forEach{put(JSONObject().apply{put("title",it.title);put("url",it.url);put("summary",it.summary);put("status",it.status);put("sourceLabel",it.source);put("publishedAt",it.publishedAt);put("confidence",it.confidence)})}});
+                    put("news",JSONArray().apply{f.items.forEach{put(JSONObject().apply{put("title",it.title);put("url",it.url);put("summary",it.summary);put("status",it.status);put("sourceLabel",it.source);put("publishedAt",it.publishedAt);put("confidence",it.confidence);if(it.targetVersion!=null)put("targetVersion",it.targetVersion)})}});
                     put("events",JSONArray().apply{f.events.forEach{put(JSONObject().apply{put("title",it.title);put("type",it.type);put("startAt",it.start.toString());put("endAt",it.end?.toString());put("note",it.note);put("sourceUrl",it.sourceUrl);put("status",it.status);put("confidence",it.confidence)})}});
                     put("versions",JSONArray().apply{f.versions.forEach{put(JSONObject().apply{put("version",it.version);put("status",it.status);put("confidence",it.confidence);put("sourceUrls",JSONArray(it.sourceUrls))})}});
                     put("banners",JSONArray().apply{f.banners.forEach{put(JSONObject().apply{put("title",it.title);put("version",it.version);put("phase",it.phase);put("startAt",it.startAt?.toString());put("endAt",it.endAt?.toString());put("status",it.status);put("confidence",it.confidence);put("sourceLabel",it.sourceLabel);put("weapon",it.weaponClaim);put("resonatorImages",JSONObject(it.resonatorImages));put("weaponImages",JSONObject(it.weaponImages));put("sourceUrls",JSONArray(it.sourceUrls))})}});

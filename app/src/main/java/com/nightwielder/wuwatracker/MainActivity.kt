@@ -54,6 +54,7 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 import java.io.File
+import java.io.InputStream
 import java.io.FileOutputStream
 import java.io.ByteArrayOutputStream
 import java.security.MessageDigest
@@ -298,11 +299,63 @@ private data class CachedArtUrl(val url:String?,val cachedAt:Long)
 private val fandomArtUrlCache=ConcurrentHashMap<String,CachedArtUrl>()
 private const val ART_CACHE_TTL_MS=6*60*60*1000L
 private const val ART_MAX_BYTES=5*1024*1024
+private const val ART_MAX_DECODE_EDGE=2048
+private const val MAX_FEED_BYTES=5*1024*1024
+private const val MAX_FEED_ARRAY_ITEMS=500
+private fun sampledOptions(bounds:BitmapFactory.Options):BitmapFactory.Options? {
+    val width=bounds.outWidth; val height=bounds.outHeight
+    if(width<=0||height<=0||width.toLong()*height.toLong()>1_000_000_000L)return null
+    var sample=1
+    while(maxOf(width,height)/sample>ART_MAX_DECODE_EDGE&&sample<(1 shl 29))sample*=2
+    return BitmapFactory.Options().apply{inSampleSize=sample}
+}
+private fun decodeArtwork(bytes:ByteArray):Bitmap? {
+    val bounds=BitmapFactory.Options().apply{inJustDecodeBounds=true}
+    BitmapFactory.decodeByteArray(bytes,0,bytes.size,bounds)
+    val options=sampledOptions(bounds)?:return null
+    return BitmapFactory.decodeByteArray(bytes,0,bytes.size,options)
+}
+private fun decodeArtwork(file:File):Bitmap? {
+    val bounds=BitmapFactory.Options().apply{inJustDecodeBounds=true}
+    BitmapFactory.decodeFile(file.absolutePath,bounds)
+    val options=sampledOptions(bounds)?:return null
+    return BitmapFactory.decodeFile(file.absolutePath,options)
+}
+private fun openFandomArtworkConnection(startUrl:String):HttpURLConnection {
+    var target=URL(startUrl);var redirects=0
+    while(true){
+        if(!isFandomArtUrl(target.toString()))throw IllegalArgumentException("Artwork host is not approved")
+        val connection=(target.openConnection() as HttpURLConnection).apply{useCaches=false;instanceFollowRedirects=false;connectTimeout=8000;readTimeout=10000;setRequestProperty("Cache-Control","no-cache");setRequestProperty("User-Agent","WuWaTracker/1.0 (Android)")}
+        val status=connection.responseCode
+        if(status in listOf(301,302,303,307,308)){
+            val location=connection.getHeaderField("Location");connection.disconnect()
+            if(location.isNullOrBlank()||redirects>=3)throw IllegalStateException("Artwork redirect limit exceeded")
+            redirects++;target=URL(target,location)
+            if(!isFandomArtUrl(target.toString()))throw IllegalArgumentException("Artwork redirect host is not approved")
+            continue
+        }
+        if(status !in 200..299){connection.disconnect();throw IllegalStateException("Artwork request failed")}
+        if(!isFandomArtUrl(connection.url.toString())){connection.disconnect();throw IllegalArgumentException("Artwork destination is not approved")}
+        return connection
+    }
+}
+private fun readBounded(input:InputStream,limit:Int):ByteArray {
+    val output=ByteArrayOutputStream();val buffer=ByteArray(8192);var total=0
+    while(true){val count=input.read(buffer);if(count<0)break;total+=count;if(total>limit)throw IllegalStateException("Response is too large");output.write(buffer,0,count)}
+    return output.toByteArray()
+}
 private fun isFandomArtUrl(value:String?):Boolean=runCatching{val u=URL(value);u.protocol=="https"&&(u.host=="fandom.com"||u.host.endsWith(".fandom.com")||u.host.endsWith(".wikia.nocookie.net")||u.host.endsWith(".wikia.com"))}.getOrDefault(false)
 private fun fandomPageImage(name:String,kind:String):String?{
     val key="$kind:${name.trim().lowercase(Locale.ROOT)}";val now=System.currentTimeMillis()
     fandomArtUrlCache[key]?.takeIf{now-it.cachedAt<(if(it.url==null)5*60*1000L else ART_CACHE_TTL_MS)}?.let{return it.url}
-    val image=runCatching{val query=URLEncoder.encode(name,"UTF-8");val api=URL("https://wutheringwaves.fandom.com/api.php?action=query&titles=$query&prop=pageimages&format=json&pithumbsize=640&redirects=1");val conn=api.openConnection().apply{useCaches=false;connectTimeout=7000;readTimeout=7000;setRequestProperty("Cache-Control","no-cache");setRequestProperty("User-Agent","WuWaTracker/1.0 (Android)")};val json=conn.getInputStream().bufferedReader().use{it.readText()};val pages=JSONObject(json).getJSONObject("query").getJSONObject("pages");val keys=pages.keys();if(!keys.hasNext())null else pages.getJSONObject(keys.next()).optJSONObject("thumbnail")?.optString("source")?.takeIf(::isFandomArtUrl)}.getOrNull()
+    val image=runCatching{
+        val query=URLEncoder.encode(name,"UTF-8")
+        val api="https://wutheringwaves.fandom.com/api.php?action=query&titles=$query&prop=pageimages&format=json&pithumbsize=640&redirects=1"
+        val conn=openFandomArtworkConnection(api)
+        val json=try{if(conn.contentLengthLong>1024*1024)throw IllegalStateException("Artwork metadata is too large");conn.inputStream.use{String(readBounded(it,1024*1024),Charsets.UTF_8)}}finally{conn.disconnect()}
+        val pages=JSONObject(json).getJSONObject("query").getJSONObject("pages");val keys=pages.keys()
+        if(!keys.hasNext())null else pages.getJSONObject(keys.next()).optJSONObject("thumbnail")?.optString("source")?.takeIf(::isFandomArtUrl)
+    }.getOrNull()
     fandomArtUrlCache[key]=CachedArtUrl(image,now);return image
 }
 private fun artworkFile(context:Context,identity:String,url:String):File{val digest=MessageDigest.getInstance("SHA-256").digest("$identity|$url".toByteArray()).joinToString(""){"%02x".format(it)};return File(File(context.cacheDir,"banner-artwork"),digest+".img")}
@@ -310,9 +363,18 @@ private fun pruneArtworkCache(context:Context){val dir=File(context.cacheDir,"ba
 private fun loadArtwork(context:Context,identity:String,url:String,crop:Float,expiresAt:Long,verticalBias:Float=.5f):ImageBitmap?=runCatching{
     val file=artworkFile(context,identity,url);val expiryFile=File(file.parentFile,file.name+".expiry");val now=System.currentTimeMillis()
     val storedExpiry=expiryFile.takeIf{it.isFile}?.readText()?.toLongOrNull()?:0L
-    var bitmap:Bitmap?=if(file.isFile&&storedExpiry!=0L&&(storedExpiry==Long.MAX_VALUE||now<storedExpiry))BitmapFactory.decodeFile(file.absolutePath)else null
-    if(bitmap==null){file.delete();expiryFile.delete();val connection=(URL(url).openConnection() as HttpURLConnection).apply{useCaches=false;instanceFollowRedirects=true;connectTimeout=8000;readTimeout=10000;setRequestProperty("Cache-Control","no-cache");setRequestProperty("User-Agent","WuWaTracker/1.0 (Android)")}
-        try{if(connection.responseCode !in 200..299)throw IllegalStateException("Artwork request failed");if(connection.contentLengthLong>ART_MAX_BYTES)throw IllegalStateException("Artwork is too large");val bytes=connection.inputStream.use{input->val output=ByteArrayOutputStream();val buffer=ByteArray(8192);var total=0;while(true){val count=input.read(buffer);if(count<0)break;total+=count;if(total>ART_MAX_BYTES)throw IllegalStateException("Artwork is too large");output.write(buffer,0,count)};output.toByteArray()};bitmap=BitmapFactory.decodeByteArray(bytes,0,bytes.size)?:throw IllegalStateException("Unsupported artwork");file.parentFile?.mkdirs();val temp=File(file.parentFile,file.name+"."+Thread.currentThread().id+".tmp");FileOutputStream(temp).use{it.write(bytes)};if(temp.renameTo(file)){file.setLastModified(now);expiryFile.writeText(expiresAt.toString())}else temp.delete()}finally{connection.disconnect()}
+    var bitmap:Bitmap?=if(file.isFile&&storedExpiry!=0L&&(storedExpiry==Long.MAX_VALUE||now<storedExpiry))decodeArtwork(file)else null
+    if(bitmap==null){
+        file.delete();expiryFile.delete()
+        val connection=openFandomArtworkConnection(url)
+        try{
+            if(connection.contentLengthLong>ART_MAX_BYTES)throw IllegalStateException("Artwork is too large")
+            val bytes=connection.inputStream.use{readBounded(it,ART_MAX_BYTES)}
+            bitmap=decodeArtwork(bytes)?:throw IllegalStateException("Unsupported or oversized artwork")
+            file.parentFile?.mkdirs();val temp=File(file.parentFile,file.name+"."+Thread.currentThread().id+".tmp")
+            FileOutputStream(temp).use{it.write(bytes)}
+            if(temp.renameTo(file)){file.setLastModified(now);expiryFile.writeText(expiresAt.toString())}else temp.delete()
+        }finally{connection.disconnect()}
     }
     bitmap?.let{source->val side=(minOf(source.width,source.height)*crop).toInt().coerceAtLeast(1);val left=((source.width-side)/2).coerceIn(0,source.width-side);val top=((source.height-side)*verticalBias).toInt().coerceIn(0,source.height-side);Bitmap.createBitmap(source,left,top,side,side).asImageBitmap()}
 }.getOrNull()
@@ -382,7 +444,7 @@ private fun showCustomReminderPicker(context: Context, onSelected: (Instant) -> 
     }, initial.year, initial.monthValue - 1, initial.dayOfMonth).apply { datePicker.minDate = System.currentTimeMillis() }.show()
 }
 
-@Composable private fun FeedCard(item: FeedItem) { val label = if (item.status == "LEAK") "LEAK · UNCONFIRMED" else item.status; val tint=when(item.status.uppercase()){"OFFICIAL"->Color(0xFF314A5B);"LEAK"->Color(0xFF523241);else->Color(0xFF3A354D)};Card(Modifier.fillMaxWidth().clickable { openUrl(item.url) },colors=CardDefaults.cardColors(containerColor=tint)) { Column(Modifier.padding(16.dp), Arrangement.spacedBy(6.dp)) { Text("$label", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold,color=Color(0xFFFFD68A)); Text(item.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold); if (item.summary.isNotBlank() && !(item.status.equals("LEAK",true)&&item.summary.trim().equals(item.title.trim(),true))) Text(item.summary); Text("Source: ${item.source} · Tap to open matching article", style = MaterialTheme.typography.bodySmall) } } }
+@Composable private fun FeedCard(item: FeedItem) { val label = if (item.status == "LEAK") "LEAK · UNCONFIRMED" else item.status; val tint=when(item.status.uppercase()){"OFFICIAL"->Color(0xFF314A5B);"LEAK"->Color(0xFF523241);else->Color(0xFF3A354D)};Card(Modifier.fillMaxWidth().clickable { openUrl(item.url) },colors=CardDefaults.cardColors(containerColor=tint)) { Column(Modifier.padding(16.dp), Arrangement.spacedBy(6.dp)) { Text("$label", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold,color=Color(0xFFFFD68A)); Text(item.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold); if (item.summary.isNotBlank() && !(item.status.equals("LEAK",true)&&item.summary.trim().equals(item.title.trim(),true))) Text(item.summary); Text("Source: ${item.source} · Destination: ${Uri.parse(item.url).host.orEmpty()}", style = MaterialTheme.typography.bodySmall) } } }
 @Composable private fun IntelCard(title: String, body: String, url: String?) { Card(Modifier.fillMaxWidth().clickable(enabled = url?.startsWith("https://") == true) { openUrl(url!!) }) { Column(Modifier.padding(16.dp), Arrangement.spacedBy(4.dp)) { Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold); Text(body); if (url != null) Text("Source evidence • tap to open", style = MaterialTheme.typography.bodySmall) } } }
 @Composable private fun TaskCard(title: String, subtitle: String, done: Boolean, onDone: (Boolean) -> Unit) { Card { Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) { Column(Modifier.weight(1f)) { Text(title, fontWeight = FontWeight.SemiBold); Text(subtitle) }; Checkbox(done, onDone) } } }
 @Composable private fun EventCard(event: TrackerEvent, now: Instant) { val active = event.start <= now && (event.end == null || event.end.isAfter(now)); val remaining = if (event.start == Instant.EPOCH) "Ongoing / Recurring" else if (active && event.end != null) "Ends in ${durationText(Duration.between(now, event.end))}" else if (event.start > now) "Starts in ${durationText(Duration.between(now, event.start))}" else "Ended"; Card(Modifier.fillMaxWidth().clickable(enabled = event.sourceUrl.isNotBlank()) { openUrl(event.sourceUrl) }) { Column(Modifier.padding(16.dp), Arrangement.spacedBy(5.dp)) { Text(event.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold); Text(remaining); Text(event.note, style = MaterialTheme.typography.bodySmall); if (event.status == "LEAK") Text("LEAK · UNCONFIRMED", style = MaterialTheme.typography.labelSmall) } } }
@@ -433,7 +495,7 @@ private fun stateToJson(state: UiState) = JSONObject().apply {
     put("resonators", JSONArray().apply { state.resonators.forEach { put(JSONObject().apply { put("name",it.name); put("version",it.version); put("phase",it.phase); put("element",it.element); put("weapon",it.weapon); put("status",it.status); put("confidence",it.confidence); put("sourceUrls",JSONArray(it.sourceUrls)) }) } })
 }
 
-private fun parseFeed(raw: String?): FeedResult { if (raw.isNullOrBlank()) return FeedResult(emptyList(), emptyList(), emptyList(), emptyList(), emptyList(), null); return runCatching { val root=JSONObject(raw); val bannerRows=parseBanners(root.optJSONArray("scheduleSnapshots") ?: JSONArray()) + parseBanners(root.optJSONArray("banners") ?: JSONArray()) + parseBanners(root.optJSONArray("activeBanners") ?: JSONArray()) + parseBanners(root.optJSONArray("upcomingBanners") ?: JSONArray()); val banners=bannerRows.groupBy { it.title.lowercase(Locale.ROOT)+it.version+it.phase }.values.mapNotNull { rows -> rows.maxByOrNull { (if(it.weaponClaim.isNullOrBlank())0 else 10+it.weaponClaim.length)+it.weaponImages.size*3+it.resonatorImages.size } }; FeedResult(parseNews(root.optJSONArray("news") ?: root.optJSONArray("items") ?: JSONArray()), parseEvents(root.optJSONArray("events") ?: JSONArray()), parseVersions(root.optJSONArray("versions") ?: JSONArray()), banners, parseResonators(root.optJSONArray("resonators") ?: JSONArray()), root.optString("latestVersion").takeIf { it.isNotBlank() } ?: root.optString("version").takeIf { it.isNotBlank() }) }.getOrDefault(FeedResult(emptyList(),emptyList(),emptyList(),emptyList(),emptyList(),null)) }
+private fun parseFeed(raw: String?): FeedResult { if (raw.isNullOrBlank()||raw.length>MAX_FEED_BYTES) return FeedResult(emptyList(), emptyList(), emptyList(), emptyList(), emptyList(), null); return runCatching { val root=JSONObject(raw); val fieldNames=root.keys(); while(fieldNames.hasNext()){val value=root.opt(fieldNames.next());if(value is JSONArray&&value.length()>MAX_FEED_ARRAY_ITEMS)error("Feed contains too many records")}; val bannerRows=parseBanners(root.optJSONArray("scheduleSnapshots") ?: JSONArray()) + parseBanners(root.optJSONArray("banners") ?: JSONArray()) + parseBanners(root.optJSONArray("activeBanners") ?: JSONArray()) + parseBanners(root.optJSONArray("upcomingBanners") ?: JSONArray()); val banners=bannerRows.groupBy { it.title.lowercase(Locale.ROOT)+it.version+it.phase }.values.mapNotNull { rows -> rows.maxByOrNull { (if(it.weaponClaim.isNullOrBlank())0 else 10+it.weaponClaim.length)+it.weaponImages.size*3+it.resonatorImages.size } }; FeedResult(parseNews(root.optJSONArray("news") ?: root.optJSONArray("items") ?: JSONArray()), parseEvents(root.optJSONArray("events") ?: JSONArray()), parseVersions(root.optJSONArray("versions") ?: JSONArray()), banners, parseResonators(root.optJSONArray("resonators") ?: JSONArray()), root.optString("latestVersion").takeIf { it.isNotBlank() } ?: root.optString("version").takeIf { it.isNotBlank() }) }.getOrDefault(FeedResult(emptyList(),emptyList(),emptyList(),emptyList(),emptyList(),null)) }
 private fun sourceLabel(type: String, name: String, id: String): String = when {
     type.startsWith("X") -> if (name.isNotBlank() && name != id) "X · $name" else "X (indexed)"
     type == "Reddit" -> if (name.isNotBlank() && name != id) "Reddit · $name" else "Reddit"
@@ -502,7 +564,7 @@ private fun mergeEvents(base:List<TrackerEvent>, remote:List<TrackerEvent>)=(bas
 private suspend fun fetchFeed(url: String): FeedResult = withContext(Dispatchers.IO) {
     require(url.startsWith("https://")) { "HTTPS required" }
     val conn=(URL(url).openConnection() as HttpURLConnection).apply { requestMethod="GET"; connectTimeout=15000; readTimeout=20000; instanceFollowRedirects=false; setRequestProperty("Accept","application/json"); setRequestProperty("User-Agent","WuWaTracker/1.3") }
-    try { if(conn.responseCode !in 200..299) error("HTTP ${conn.responseCode}"); val body=conn.inputStream.bufferedReader().use{it.readText()}; parseFeed(body) } finally { conn.disconnect() }
+    try { if(conn.responseCode !in 200..299) error("HTTP ${conn.responseCode}"); if(conn.contentLengthLong>MAX_FEED_BYTES)error("Feed is too large"); val body=conn.inputStream.use{String(readBounded(it,MAX_FEED_BYTES),Charsets.UTF_8)}; parseFeed(body) } finally { conn.disconnect() }
 }
 private fun refreshGithubFeed(
     context: Context,
@@ -556,4 +618,4 @@ private fun cancelCustomReminder(){val context=App.instance?:return;val intent=I
 private fun cancelResetAlarm(){val context=App.instance?:return;val intent=Intent(context,ResetAlarmReceiver::class.java);val pending=PendingIntent.getBroadcast(context,RESET_ALARM,intent,PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE);context.getSystemService(AlarmManager::class.java).cancel(pending)}
 class ResetAlarmReceiver:BroadcastReceiver(){override fun onReceive(context:Context,intent:Intent){val custom=intent.getBooleanExtra("custom",false);val server=runCatching{Server.valueOf(intent.getStringExtra("server")?:Server.SEA.name)}.getOrDefault(Server.SEA);val lead=intent.getIntExtra("lead",0);if(ActivityCompat.checkSelfPermission(context,Manifest.permission.POST_NOTIFICATIONS)==PackageManager.PERMISSION_GRANTED)NotificationManagerCompat.from(context).notify(if(custom)2002 else 2001,NotificationCompat.Builder(context,CHANNEL_ID).setSmallIcon(android.R.drawable.ic_popup_reminder).setContentTitle("Wuthering Waves reminder").setContentText(if(custom)"Your custom reminder is due." else if(lead==0)"${server.label} server daily reset is now live." else "${server.label} server reset is in $lead minutes. Finish your dailies and claim Lunite.").setAutoCancel(true).build());if(!custom)scheduleResetAlarm(server,lead)}}
 class App:Application(){override fun onCreate(){super.onCreate();instance=this;WorkManager.getInstance(this).enqueueUniquePeriodicWork(FEED_WORK,ExistingPeriodicWorkPolicy.UPDATE,PeriodicWorkRequestBuilder<FeedSyncWorker>(24,TimeUnit.HOURS).setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()).build())}companion object{var instance:App?=null}}
-private fun openUrl(url:String){if(!url.startsWith("https://"))return;val ctx=App.instance?:return;runCatching{ctx.startActivity(Intent(Intent.ACTION_VIEW,Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))}}
+private fun openUrl(url:String){val uri=runCatching{Uri.parse(url)}.getOrNull()?:return;if(uri.scheme!="https"||uri.host.isNullOrBlank()||uri.userInfo!=null)return;val ctx=App.instance?:return;runCatching{ctx.startActivity(Intent(Intent.ACTION_VIEW,uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))}}

@@ -3,6 +3,8 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+dependencyLocking { lockAllConfigurations() }
+
 android { namespace = "com.nightwielder.wuwatracker"; compileSdk = 35
     defaultConfig { applicationId = "com.nightwielder.wuwatracker"; minSdk = 26; targetSdk = 35; versionCode = 100; versionName = "1.0.0" }
     buildTypes { release { isMinifyEnabled = true; proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro") } }

@@ -2,9 +2,15 @@
 .kotlin/
 **/build/
 local.properties
+compile.log
 .idea/
 *.iml
 __pycache__/
 *.py[cod]
 *.apk
 *.zip
+*.jks
+*.keystore
+keystore.properties
+signing.properties
+key.properties

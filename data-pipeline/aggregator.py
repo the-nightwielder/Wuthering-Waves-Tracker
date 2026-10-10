@@ -12,6 +12,8 @@ from email.utils import parsedate_to_datetime
 from pathlib import Path
 from urllib.parse import quote_plus, urljoin
 
+from security_controls import is_verified_official_source, read_bounded_chunks
+
 import feedparser
 import requests
 from bs4 import BeautifulSoup
@@ -21,8 +23,21 @@ SOURCES = json.loads((ROOT / "sources.json").read_text())['sources']
 OUT = ROOT / "feed.json"
 UA = "WuWaTrackerDataBot/1.3 (+https://github.com/)"
 TIMEOUT = 20
+MAX_SOURCE_RESPONSE_BYTES = 10 * 1024 * 1024
 session = requests.Session()
 session.headers.update({"User-Agent": UA, "Accept-Language": "en-US,en;q=0.9"})
+
+
+def bounded_get(url, **kwargs):
+    kwargs.setdefault("timeout", TIMEOUT)
+    kwargs["stream"] = True
+    response = session.get(url, **kwargs)
+    try:
+        response.raise_for_status()
+        body = read_bounded_chunks(response.iter_content(chunk_size=64 * 1024), MAX_SOURCE_RESPONSE_BYTES)
+        return response, body
+    finally:
+        response.close()
 
 WUWA_TERMS = re.compile(r"wuthering\s+waves|wuwa|resonator|astrite|lunite|convene|tower of adversity|endstate matrix|whimpering wastes|banner|tacet field|phantom", re.I)
 GAME_CONTEXT = re.compile(r"wuthering\s+waves|\bwuwa\b", re.I)
@@ -63,16 +78,16 @@ def parse_date(entry):
     return datetime.now(timezone.utc).isoformat()
 
 
-def status_for(source, title, summary):
+def status_for(source, title, summary, publisher_url=None):
     text = f"{title} {summary}"
-    if source['category'] == 'official':
+    if is_verified_official_source(source, publisher_url):
         return "OFFICIAL", 0.98
     if source['category'] == 'leak-community' or LEAK_TERMS.search(text):
         return "LEAK", 0.52
     return "COMMUNITY", 0.68
 
 
-def make_item(source, title, url, summary="", published=None, publisher=""):
+def make_item(source, title, url, summary="", published=None, publisher="", publisher_url=None):
     title, summary = clean_text(title), clean_text(summary)
     if not title or not url or not WUWA_TERMS.search(f"{title} {summary}"):
         return None
@@ -82,13 +97,13 @@ def make_item(source, title, url, summary="", published=None, publisher=""):
         return None
     if 'megathread' in title.lower() and not REDDIT_TITLE_CONTEXT.search(title.replace('megathread', '')):
         return None
-    status, confidence = status_for(source, title, summary)
-    if source['id'].startswith('x-'):
+    status, confidence = status_for(source, title, summary, publisher_url)
+    if status == 'OFFICIAL':
+        source_type = 'Official source'
+    elif source['id'].startswith('x-'):
         source_type = 'X · indexed by Google News'
     elif source['kind'] == 'rss':
         source_type = 'Reddit'
-    elif source['category'] == 'official':
-        source_type = 'Official website'
     else:
         source_type = 'Website'
     return {
@@ -103,24 +118,25 @@ def make_item(source, title, url, summary="", published=None, publisher=""):
 
 def google_news(source):
     url = "https://news.google.com/rss/search?q=" + quote_plus(source['query']) + "&hl=en-US&gl=US&ceid=US:en"
-    r = session.get(url, timeout=TIMEOUT); r.raise_for_status()
-    feed = feedparser.parse(r.content)
+    r, body = bounded_get(url)
+    feed = feedparser.parse(body)
     for e in feed.entries[:60]:
         source_info = e.get('source') or {}
         publisher = source_info.get('title', '') if isinstance(source_info, dict) else ''
-        yield make_item(source, e.get('title'), e.get('link'), e.get('summary'), parse_date(e), publisher)
+        publisher_url = (source_info.get('href') or source_info.get('url')) if isinstance(source_info, dict) else None
+        yield make_item(source, e.get('title'), e.get('link'), e.get('summary'), parse_date(e), publisher, publisher_url)
 
 
 def rss(source):
-    r = session.get(source['url'], timeout=TIMEOUT); r.raise_for_status()
-    feed = feedparser.parse(r.content)
+    r, body = bounded_get(source['url'])
+    feed = feedparser.parse(body)
     for e in feed.entries[:60]:
         yield make_item(source, e.get('title'), e.get('link'), e.get('summary'), parse_date(e))
 
 
 def html_page(source):
-    r = session.get(source['url'], timeout=TIMEOUT); r.raise_for_status()
-    soup = BeautifulSoup(r.text, 'html.parser'); seen = set()
+    r, body = bounded_get(source['url'])
+    soup = BeautifulSoup(body.decode(r.encoding or 'utf-8', errors='replace'), 'html.parser'); seen = set()
     for a in soup.find_all('a', href=True):
         title = clean_text(a.get_text(' ', strip=True)); href = urljoin(r.url, a['href'])
         if not title or href in seen or len(title) < 8:
@@ -253,12 +269,11 @@ def fandom_image(name):
         return _FANDOM_IMAGE_CACHE[key]
     image = None
     try:
-        response = session.get("https://wutheringwaves.fandom.com/api.php", params={
+        response, body = bounded_get("https://wutheringwaves.fandom.com/api.php", params={
             "action": "query", "titles": name, "prop": "pageimages", "format": "json",
             "pithumbsize": 640, "redirects": 1
-        }, timeout=TIMEOUT)
-        response.raise_for_status()
-        pages = response.json().get("query", {}).get("pages", {})
+        })
+        pages = json.loads(body.decode(response.encoding or 'utf-8')).get("query", {}).get("pages", {})
         page = next(iter(pages.values()), {})
         image = page.get("thumbnail", {}).get("source")
         if image and not image.startswith("https://"):
@@ -270,9 +285,8 @@ def fandom_image(name):
 
 
 def banner_snapshot(source):
-    r = session.get(source["url"], timeout=TIMEOUT)
-    r.raise_for_status()
-    soup = BeautifulSoup(r.text, "html.parser")
+    r, body = bounded_get(source["url"])
+    soup = BeautifulSoup(body.decode(r.encoding or 'utf-8', errors='replace'), "html.parser")
     image_labels = " ".join(img.get("alt", "") for img in soup.find_all("img"))
     text = clean_text(soup.get_text(" ", strip=True) + " " + image_labels)
     now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -399,9 +413,8 @@ def banner_snapshot(source):
 
 def timeline_weapon_details(source):
     """Read labeled weapon-banner artwork from the public WuWa Tracker timeline."""
-    r = session.get(source["url"], timeout=TIMEOUT)
-    r.raise_for_status()
-    soup = BeautifulSoup(r.text, "html.parser")
+    r, body = bounded_get(source["url"])
+    soup = BeautifulSoup(body.decode(r.encoding or 'utf-8', errors='replace'), "html.parser")
     details, labels = {}, []
     for node in soup.find_all(["img", "a", "figure", "div"]):
         for value in (node.get("alt", ""), node.get("title", ""), node.get("aria-label", "")):

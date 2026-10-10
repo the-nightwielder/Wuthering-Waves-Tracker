@@ -453,13 +453,22 @@ def main():
         except Exception as exc:
             errors.append({"sourceId": source['id'], "error": str(exc)[:300]})
 
-    version_candidates = [m.group(1) for item in items if item.get("status") == "OFFICIAL"
-                          for m in [VERSION_RE.search(item.get("title", "") + " " + item.get("summary", ""))] if m]
-    # Upcoming snapshots can describe the next patch; using them as "current"
-    # advances the leak search one patch too far and hides the real next-version leaks.
-    version_candidates += [snapshot["version"] for snapshot in snapshots
-                           if snapshot.get("version") and snapshot.get("snapshotType") == "current"]
-    current_version = max(version_candidates, key=lambda value: tuple(map(int, value.split(".")))) if version_candidates else None
+    # Only a dated snapshot explicitly marked current determines the live version.
+    # Official news may announce a future patch before that patch goes live.
+    now_utc = datetime.now(timezone.utc)
+    live_version_candidates = []
+    for snapshot in snapshots:
+        if snapshot.get("snapshotType") != "current" or not snapshot.get("version"):
+            continue
+        try:
+            start = datetime.fromisoformat(snapshot["startAt"].replace("Z", "+00:00"))
+            end = datetime.fromisoformat(snapshot["endAt"].replace("Z", "+00:00"))
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if start <= now_utc <= end:
+            live_version_candidates.append(snapshot["version"])
+    live_version = max(live_version_candidates, key=lambda value: tuple(map(int, value.split(".")))) if live_version_candidates else None
+    current_version = live_version
     if current_version:
         major, minor = map(int, current_version.split("."))
         next_version = f"{major}.{minor + 1}"
@@ -469,10 +478,10 @@ def main():
             try:
                 for item in google_news(targeted):
                     if item:
+                        item["targetVersion"] = next_version
                         items.append(item)
             except Exception as exc:
                 errors.append({"sourceId": source["id"], "error": str(exc)[:300]})
-
     # A small verified mapping prevents the signature weapons for the known live
     # version from disappearing if the timeline temporarily omits its labels.
     if current_version == "3.7":
@@ -512,22 +521,6 @@ def main():
     versions, banners, resonators, events = extract_entities(final)
     versions, banners, resonators, events = [merge_by_entity(x) for x in (versions, banners, resonators, events)]
     versions.sort(key=lambda x: tuple(map(int, x['version'].split('.'))), reverse=True)
-
-    # The live version comes from a dated snapshot explicitly identified as current.
-    # Official announcements may mention a future patch before its launch date.
-    now_utc = datetime.now(timezone.utc)
-    live_version_candidates = []
-    for snapshot in snapshots:
-        if snapshot.get("snapshotType") != "current" or not snapshot.get("version"):
-            continue
-        try:
-            start = datetime.fromisoformat(snapshot["startAt"].replace("Z", "+00:00"))
-            end = datetime.fromisoformat(snapshot["endAt"].replace("Z", "+00:00"))
-        except (KeyError, TypeError, ValueError):
-            continue
-        if start <= now_utc <= end:
-            live_version_candidates.append(snapshot["version"])
-    live_version = max(live_version_candidates, key=lambda value: tuple(map(int, value.split(".")))) if live_version_candidates else None
 
     payload = {
         "schemaVersion": 3,

@@ -68,7 +68,7 @@ private val Context.dataStore by preferencesDataStore("wuwa_tracker")
 private const val CHANNEL_ID = "wuwa_reminders"
 private const val RESET_ALARM = 1001
 private const val FEED_WORK = "wuwa_feed_sync"
-private const val GITHUB_FEED_URL = "https://the-nightwielder.github.io/Wuthering-Waves-Tracker/feed.json"
+private const val GITHUB_FEED_URL = "https://the-nightwielder.github.io/WuWa-Tracker/feed.json"
 
 enum class Server(val label: String, val zone: String) {
     AMERICA("America", "America/New_York"), EUROPE("Europe", "Europe/London"),
@@ -92,7 +92,7 @@ data class UiState(
 )
 
 private fun defaultEvents() = listOf(
-    TrackerEvent("Tower of Adversity", "Endgame", Instant.EPOCH, null, "Permanent/recurring endgame. Use the in-game timer for the active rotation."),
+    TrackerEvent("Tower of Adversity", "Endgame", Instant.EPOCH, null, "Permanent/recurring content. Use the in-game timer for the active rotation."),
     TrackerEvent("Whimpering Wastes", "Endgame", Instant.EPOCH, null, "Permanent/recurring content. Use the in-game timer for the active cycle."),
     TrackerEvent("Endstate Matrix", "Endgame", Instant.EPOCH, null, "Version/phase-linked challenge. Use the in-game timer for exact availability.")
 )
@@ -208,8 +208,8 @@ private fun WuWaTrackerRoot() {
         item{Text("Daily Checklist",style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.SemiBold,color=Color.White)}
         item{TaskCard("Daily Activities","Reach 100 Activity Points • +60 Astrites",state.dailyDone){v->onUpdate{it.copy(dailyDone=v)}}}
         item{TaskCard("Lunite Subscription","Claim today's reward • +90 Astrites",state.luniteDone){v->onUpdate{it.copy(luniteDone=v)}}}
-        item{Text("Monthly / Version-Cycle Checklist",style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.SemiBold,color=Color.White)}
-        item{Text("Home checks reset with the server's calendar month. Endgame tab is unchanged.",style=MaterialTheme.typography.bodySmall)}
+        item{Text("Monthly Endgame Checklist",style=MaterialTheme.typography.titleLarge.copy(fontSize=22.sp),fontWeight=FontWeight.Bold,color=Color(0xFFFFD994))}
+        item{Text("These checkboxes reset with the server's calendar month. Exact active phases should be verified in-game.",style=MaterialTheme.typography.bodyMedium,color=Color(0xFFE2DDEA))}
         item{TaskCard("Tower of Adversity","Complete this Tower cycle",state.monthlyTower){v->onUpdate{it.copy(monthlyTower=v)}}}
         item{TaskCard("Whimpering Wastes","Complete this challenge cycle",state.monthlyWastes){v->onUpdate{it.copy(monthlyWastes=v)}}}
         item{TaskCard("Endstate Matrix","Complete this challenge cycle",state.monthlyMatrix){v->onUpdate{it.copy(monthlyMatrix=v)}}}
@@ -224,7 +224,7 @@ private fun WuWaTrackerRoot() {
 }
 @Composable private fun IntelScreen(state: UiState, now: Instant, syncing: Boolean, syncMessage: String, onRefresh: () -> Unit, onToggle:(String)->Unit, modifier: Modifier) {
     val appContext=androidx.compose.ui.platform.LocalContext.current.applicationContext
-    val groups=listOf(IntelGroup("Official Confirmations","OFFICIAL","No recent official updates for this version."),IntelGroup("Unconfirmed Leaks","LEAK","No recent version-relevant leak reports."),IntelGroup("Community Reports","COMMUNITY","No recent version-relevant community reports."))
+    val groups=listOf(IntelGroup("Official Confirmations","OFFICIAL","No recent official updates for this version."),IntelGroup("Unconfirmed Leaks","LEAK","No upcoming version-relevant leak reports."),IntelGroup("Community Reports","COMMUNITY","No recent version-relevant community reports."))
     val version=state.version.takeIf{it!="Unknown"}?:"3.7"
     val feed=state.feedItems.filter{it.relevant(version,now)}.sortedByDescending{runCatching{Instant.parse(it.publishedAt)}.getOrDefault(Instant.EPOCH)}
     val banners=state.banners.filter{it.relevant(version,now)}
@@ -240,8 +240,8 @@ private fun WuWaTrackerRoot() {
     LaunchedEffect(state.banners){withContext(Dispatchers.IO){pruneArtworkCache(appContext)}}
     ArtworkScreen(modifier,R.drawable.bg_intel){LazyColumn(Modifier.fillMaxSize().padding(horizontal=16.dp,vertical=12.dp),verticalArrangement=Arrangement.spacedBy(10.dp)){
         item{Text("Intelligence",style=MaterialTheme.typography.headlineMedium,fontWeight=FontWeight.Bold,color=Color(0xFFF3E9FF))}
-        item{InfoCard("Public intelligence feed",if(syncing)"Refreshing…" else feed.size.toString()+" recent reports · "+banners.size+" relevant banner claims",listOf(syncMessage.takeIf{it.isNotBlank()},state.lastSync.takeIf{it.isNotBlank()}?.let{"Last sync: "+relativeTime(it)}).filterNotNull().joinToString(" · ").ifBlank{"Updated from free public sources."})}
-        item{Button(onClick=onRefresh,enabled=!syncing,modifier=Modifier.fillMaxWidth()){Text(if(syncing)"Refreshing…" else "Refresh intelligence")}}
+        item{InfoCard("Public Intelligence Feed",if(syncing)"Refreshing…" else feed.size.toString()+" version-relevant reports · "+banners.size+" relevant banner claims",listOf(syncMessage.takeIf{it.isNotBlank()},state.lastSync.takeIf{it.isNotBlank()}?.let{"Last Sync: "+relativeTime(it)}).filterNotNull().joinToString(" · ").ifBlank{"Updated from free public sources."})}
+        item{Button(onClick=onRefresh,enabled=!syncing,modifier=Modifier.fillMaxWidth()){Text(if(syncing)"Refreshing…" else "Refresh Intelligence Feed")}}
         item{Text("Current version · "+version,style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.Bold,color=Color(0xFFFFD994))}
         item{Text("Active Resonator / Weapon Banners",style=MaterialTheme.typography.titleMedium,fontWeight=FontWeight.SemiBold,color=Color(0xFFE7DAFF))}
         if(active.isEmpty()) item{InfoCard("Live schedule","Banner details will appear here when the public feed refreshes.","No external site is needed to view the schedule.")}
@@ -251,7 +251,7 @@ private fun WuWaTrackerRoot() {
         items(upcoming){b->BannerOverviewCard(b,false,cacheEnd(b)?.toEpochMilli()?:Long.MAX_VALUE)}
         groups.forEach{g->
             val candidates=feed.filter{it.status.equals(g.status,true)&&(g.status!="LEAK"||it.isNextVersionLeak(version))}
-            val rows=(if(g.status=="LEAK")candidates.distinctBy{it.leakDedupKey(version,state.resonators)}else candidates).take(12)
+            val rows=(if(g.status=="LEAK")candidates.distinctBy{it.leakDedupKey(version,state.resonators)}else candidates).take(25)
             val shownArticleUrls=rows.map{it.url}.toSet()
             val gb=banners.filter{it.status.equals(g.status,true)&&(g.status!="LEAK"||(it.version?.let{v->compareVersion(v,version)>0}==true&&it.sourceUrls.none{url->url in shownArticleUrls}))}.take(8)
             val gr=state.resonators.filter{it.status.equals(g.status,true)&&if(g.status=="LEAK")it.version?.let{v->compareVersion(v,version)>0}==true&&it.sourceUrls.none{url->url in shownArticleUrls} else (it.version?.let{v->compareVersion(v,version)>=0}==true || feed.any{n->n.title.contains(it.name,true)||n.summary.contains(it.name,true)})}.take(8)
@@ -266,7 +266,7 @@ private fun WuWaTrackerRoot() {
     }}
 }
 private data class IntelGroup(val title:String,val status:String,val emptyMessage:String)
-@Composable private fun SectionHeader(g:IntelGroup,closed:Boolean,toggle:()->Unit){Card(Modifier.fillMaxWidth().clickable(onClick=toggle),colors=CardDefaults.cardColors(containerColor=when(g.status){"OFFICIAL"->Color(0xFF263746);"LEAK"->Color(0xFF482D3C);else->Color(0xFF303044)})){Row(Modifier.fillMaxWidth().padding(horizontal=18.dp,vertical=12.dp),verticalAlignment=Alignment.CenterVertically){Column(Modifier.weight(1f)){Text(g.title,style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.Bold,color=Color.White);Text(if(closed)"Tap to expand" else g.status,style=MaterialTheme.typography.labelSmall,color=Color.LightGray)};ChevronControl(closed)}}}
+@Composable private fun SectionHeader(g:IntelGroup,closed:Boolean,toggle:()->Unit){Card(Modifier.fillMaxWidth().clickable(onClick=toggle),colors=CardDefaults.cardColors(containerColor=when(g.status){"OFFICIAL"->Color(0xFF263746);"LEAK"->Color(0xFF482D3C);else->Color(0xFF303044)})){Row(Modifier.fillMaxWidth().padding(horizontal=18.dp,vertical=12.dp),verticalAlignment=Alignment.CenterVertically){Column(Modifier.weight(1f)){Text(g.title,style=MaterialTheme.typography.titleLarge,fontWeight=FontWeight.Bold,color=Color.White);Text(if(closed)"Tap to expand" else if(g.status=="LEAK")"LEAKS" else g.status,style=MaterialTheme.typography.labelSmall,color=Color.LightGray)};ChevronControl(closed)}}}
 @Composable private fun ChevronControl(collapsed:Boolean){Box(Modifier.size(44.dp),contentAlignment=Alignment.Center){Canvas(Modifier.size(22.dp)){val stroke=2.5.dp.toPx();if(collapsed){drawLine(Color.White,androidx.compose.ui.geometry.Offset(size.width*.22f,size.height*.40f),androidx.compose.ui.geometry.Offset(size.width*.50f,size.height*.68f),strokeWidth=stroke,cap=StrokeCap.Round);drawLine(Color.White,androidx.compose.ui.geometry.Offset(size.width*.50f,size.height*.68f),androidx.compose.ui.geometry.Offset(size.width*.78f,size.height*.40f),strokeWidth=stroke,cap=StrokeCap.Round)}else{drawLine(Color.White,androidx.compose.ui.geometry.Offset(size.width*.22f,size.height*.60f),androidx.compose.ui.geometry.Offset(size.width*.50f,size.height*.32f),strokeWidth=stroke,cap=StrokeCap.Round);drawLine(Color.White,androidx.compose.ui.geometry.Offset(size.width*.50f,size.height*.32f),androidx.compose.ui.geometry.Offset(size.width*.78f,size.height*.60f),strokeWidth=stroke,cap=StrokeCap.Round)}}}}
 @Composable private fun BannerOverviewCard(b:BannerIntel,current:Boolean,cacheExpiresAt:Long){
     var expanded by remember(b.title,current){mutableStateOf(false)}
@@ -286,7 +286,7 @@ private data class IntelGroup(val title:String,val status:String,val emptyMessag
             HorizontalDivider()
             Text("Weapons",style=MaterialTheme.typography.titleSmall,fontWeight=FontWeight.Bold,color=if(current)Color(0xFFFFD994) else Color(0xFFBFE8E2))
             if(weapons.isEmpty())Text("Weapon names will appear after the updated schedule feed is published.",style=MaterialTheme.typography.bodySmall,color=Color(0xFFE2DDEA)) else weapons.forEachIndexed{index,name->Row(Modifier.fillMaxWidth().padding(vertical=5.dp),horizontalArrangement=Arrangement.spacedBy(12.dp),verticalAlignment=Alignment.CenterVertically){WeaponArtwork(name,b.weaponImages[name],cacheExpiresAt);Column{Text(name,fontWeight=FontWeight.SemiBold,color=Color.White);Text("${b.version?.let{"Version $it · "}.orEmpty()}${b.phase?.let{phaseLabel(it)?.plus(" · ")}.orEmpty()}${b.startAt?.let{dateOnly(it)}?:"Schedule date unavailable"}",style=MaterialTheme.typography.bodySmall,color=Color(0xFFE2DDEA))}}}
-            if(usedFallback)Text("Weapon pairings are community schedule references.",style=MaterialTheme.typography.labelSmall,color=Color.LightGray)
+            if(usedFallback || !current)Text("Weapon pairings are community schedule references.",style=MaterialTheme.typography.labelSmall,color=Color.LightGray)
             Text("Verify exact server timing in-game.",style=MaterialTheme.typography.labelSmall,color=Color.LightGray)
         }
     }}
@@ -353,16 +353,16 @@ private fun FeedItem.relevant(version:String,now:Instant):Boolean{val mentions=R
     ArtworkScreen(modifier,R.drawable.bg_settings) {
     LazyColumn(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         item { Text("Settings", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold, color = Color(0xFFF3E9FF)) }
-        item { ExposedDropdownMenuBox(serverExpanded, { serverExpanded = !serverExpanded }) { OutlinedTextField(state.server.label, {}, readOnly = true, label = { Text("Game server") }, modifier = Modifier.menuAnchor().fillMaxWidth()); ExposedDropdownMenu(serverExpanded, { serverExpanded = false }) { Server.entries.forEach { s -> DropdownMenuItem(text = { Text(s.label) }, onClick = { update { it.copy(server = s, serverSelected = true) }; serverExpanded = false }) } } } }
+        item { ExposedDropdownMenuBox(serverExpanded, { serverExpanded = !serverExpanded }) { OutlinedTextField(state.server.label, {}, readOnly = true, label = { Text("Game Server") }, modifier = Modifier.menuAnchor().fillMaxWidth()); ExposedDropdownMenu(serverExpanded, { serverExpanded = false }) { Server.entries.forEach { s -> DropdownMenuItem(text = { Text(s.label) }, onClick = { update { it.copy(server = s, serverSelected = true) }; serverExpanded = false }) } } } }
         item { Text("Reset timezone: ${ZoneId.of(state.server.zone)}") }
-        item { Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) { Column(Modifier.weight(1f)) { Text("Enable reset reminder"); Text("Scheduled from server reset, displayed in local time.") }; Switch(state.reminderEnabled, { checked -> update { it.copy(reminderEnabled = checked) } }) } }
-        item { ExposedDropdownMenuBox(leadExpanded, { leadExpanded = !leadExpanded }) { OutlinedTextField(options.first { it.first == state.reminderLead }.second, {}, readOnly = true, label = { Text("Reminder timing") }, modifier = Modifier.menuAnchor().fillMaxWidth()); ExposedDropdownMenu(leadExpanded, { leadExpanded = false }) { options.forEach { (v, label) -> DropdownMenuItem(text = { Text(label) }, onClick = { update { it.copy(reminderLead = v) }; leadExpanded = false; if (v == -1) showCustomReminderPicker(context) { selected -> update { it.copy(customReminderAt = selected) } } }) } } } }
+        item { Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) { Column(Modifier.weight(1f)) { Text("Enable reset reminder"); Text("Turn this on to receive a reminder for the daily reset of your selected server.") }; Switch(state.reminderEnabled, { checked -> update { it.copy(reminderEnabled = checked) } }) } }
+        item { ExposedDropdownMenuBox(leadExpanded, { leadExpanded = !leadExpanded }) { OutlinedTextField(options.first { it.first == state.reminderLead }.second, {}, readOnly = true, label = { Text("Reminder Timing") }, modifier = Modifier.menuAnchor().fillMaxWidth()); ExposedDropdownMenu(leadExpanded, { leadExpanded = false }) { options.forEach { (v, label) -> DropdownMenuItem(text = { Text(label) }, onClick = { update { it.copy(reminderLead = v) }; leadExpanded = false; if (v == -1) showCustomReminderPicker(context) { selected -> update { it.copy(customReminderAt = selected) } } }) } } } }
         if (state.reminderLead == -1) item { TextButton(onClick = { showCustomReminderPicker(context) { selected -> update { it.copy(customReminderAt = selected) } } }) { Text(state.customReminderAt?.let { "Custom reminder: ${DateTimeFormatter.ofLocalizedDateTime(FormatStyle.MEDIUM).withZone(ZoneId.systemDefault()).format(it)}" } ?: "Choose reminder date and time") } }
-        item { Text("Internet Intelligence", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold, color = Color(0xFFFFD994)) }
-        item { InfoCard("Live intelligence", GITHUB_FEED_URL, "Sources include official notices, Reddit leaks, WuWa Banners, GenGamer, u7buy and LDShop. Leaks stay unconfirmed.") }
+        item { Text("Intelligence Feed", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold, color = Color(0xFFFFD994)) }
+        item { InfoCard("Live Intelligence", GITHUB_FEED_URL, "Sources include official notices, Reddit leaks, WuWa Banners, GenGamer, u7buy and LDShop. Leaks stay unconfirmed.") }
         item { Text("Security", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold, color = Color(0xFFBFE8E2)) }
         item { InfoCard("Local-first", "No game login, password, cookies or account tokens are collected.", "Only the configured HTTPS feed is requested by the app.") }
-        item { InfoCard("Leak safety", "Leaks remain clearly marked as unconfirmed.", "Check the linked source before treating a claim as confirmed.") }
+        item { InfoCard("Leak Safety", "Leaks remain clearly marked as unconfirmed.", "Check the linked source before treating a claim as confirmed.") }
     }
 }
 
@@ -385,7 +385,7 @@ private fun showCustomReminderPicker(context: Context, onSelected: (Instant) -> 
 @Composable private fun FeedCard(item: FeedItem) { val label = if (item.status == "LEAK") "LEAK · UNCONFIRMED" else item.status; val tint=when(item.status.uppercase()){"OFFICIAL"->Color(0xFF314A5B);"LEAK"->Color(0xFF523241);else->Color(0xFF3A354D)};Card(Modifier.fillMaxWidth().clickable { openUrl(item.url) },colors=CardDefaults.cardColors(containerColor=tint)) { Column(Modifier.padding(16.dp), Arrangement.spacedBy(6.dp)) { Text("$label", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold,color=Color(0xFFFFD68A)); Text(item.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold); if (item.summary.isNotBlank() && !(item.status.equals("LEAK",true)&&item.summary.trim().equals(item.title.trim(),true))) Text(item.summary); Text("Source: ${item.source} · Tap to open matching article", style = MaterialTheme.typography.bodySmall) } } }
 @Composable private fun IntelCard(title: String, body: String, url: String?) { Card(Modifier.fillMaxWidth().clickable(enabled = url?.startsWith("https://") == true) { openUrl(url!!) }) { Column(Modifier.padding(16.dp), Arrangement.spacedBy(4.dp)) { Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold); Text(body); if (url != null) Text("Source evidence • tap to open", style = MaterialTheme.typography.bodySmall) } } }
 @Composable private fun TaskCard(title: String, subtitle: String, done: Boolean, onDone: (Boolean) -> Unit) { Card { Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) { Column(Modifier.weight(1f)) { Text(title, fontWeight = FontWeight.SemiBold); Text(subtitle) }; Checkbox(done, onDone) } } }
-@Composable private fun EventCard(event: TrackerEvent, now: Instant) { val active = event.start <= now && (event.end == null || event.end.isAfter(now)); val remaining = if (event.start == Instant.EPOCH) "Ongoing / recurring" else if (active && event.end != null) "Ends in ${durationText(Duration.between(now, event.end))}" else if (event.start > now) "Starts in ${durationText(Duration.between(now, event.start))}" else "Ended"; Card(Modifier.fillMaxWidth().clickable(enabled = event.sourceUrl.isNotBlank()) { openUrl(event.sourceUrl) }) { Column(Modifier.padding(16.dp), Arrangement.spacedBy(5.dp)) { Text(event.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold); Text(remaining); Text(event.note, style = MaterialTheme.typography.bodySmall); if (event.status == "LEAK") Text("LEAK · UNCONFIRMED", style = MaterialTheme.typography.labelSmall) } } }
+@Composable private fun EventCard(event: TrackerEvent, now: Instant) { val active = event.start <= now && (event.end == null || event.end.isAfter(now)); val remaining = if (event.start == Instant.EPOCH) "Ongoing / Recurring" else if (active && event.end != null) "Ends in ${durationText(Duration.between(now, event.end))}" else if (event.start > now) "Starts in ${durationText(Duration.between(now, event.start))}" else "Ended"; Card(Modifier.fillMaxWidth().clickable(enabled = event.sourceUrl.isNotBlank()) { openUrl(event.sourceUrl) }) { Column(Modifier.padding(16.dp), Arrangement.spacedBy(5.dp)) { Text(event.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold); Text(remaining); Text(event.note, style = MaterialTheme.typography.bodySmall); if (event.status == "LEAK") Text("LEAK · UNCONFIRMED", style = MaterialTheme.typography.labelSmall) } } }
 @Composable private fun InfoCard(title: String, body: String, note: String) { Card { Column(Modifier.padding(16.dp), Arrangement.spacedBy(5.dp)) { Text(title, fontWeight = FontWeight.SemiBold); Text(body); Text(note, style = MaterialTheme.typography.bodySmall) } } }
 
 private data class FeedResult(val items: List<FeedItem>, val events: List<TrackerEvent>, val versions: List<VersionIntel>, val banners: List<BannerIntel>, val resonators: List<ResonatorIntel>, val latestVersion: String?)
@@ -518,7 +518,7 @@ private fun refreshGithubFeed(
             val fresh = loadState(context).copy(feedUrl = GITHUB_FEED_URL).withFeed(feed)
             saveState(context, fresh)
             setState(fresh)
-            setMessage(if (feed.items.isEmpty()) "GitHub feed refreshed; it contains no matching reports yet." else "GitHub feed refreshed · ${feed.items.size} reports")
+            setMessage(if (feed.items.isEmpty()) "GitHub feed refreshed; it contains no matching reports yet." else "GitHub feed refreshed · ${feed.items.size} feed entries downloaded")
         } catch (error: Exception) {
             setMessage("GitHub feed refresh failed · ${error.message ?: "check your connection"}")
         } finally {

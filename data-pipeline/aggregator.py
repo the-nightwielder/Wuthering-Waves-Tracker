@@ -349,6 +349,8 @@ def banner_snapshot(source):
             cells = [clean_text(cell.get_text(" ", strip=True)) for cell in row.find_all(["td", "th"])]
             if cells and "Live banner phase" in cells[0] and len(cells) > 2:
                 phase_match = PHASE_RE.search(" ".join(cells[:2]))
+                row_version = VERSION_RE.search(" ".join(cells[:2]))
+                version = row_version or version
                 phase = phase_match or phase
                 dates = re.findall(r"(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+20\d{2}", cells[2], re.I)
                 if len(dates) >= 2:
@@ -498,11 +500,27 @@ def main():
     versions, banners, resonators, events = [merge_by_entity(x) for x in (versions, banners, resonators, events)]
     versions.sort(key=lambda x: tuple(map(int, x['version'].split('.'))), reverse=True)
 
+    # The live version comes from a dated snapshot explicitly identified as current.
+    # Official announcements may mention a future patch before its launch date.
+    now_utc = datetime.now(timezone.utc)
+    live_version_candidates = []
+    for snapshot in snapshots:
+        if snapshot.get("snapshotType") != "current" or not snapshot.get("version"):
+            continue
+        try:
+            start = datetime.fromisoformat(snapshot["startAt"].replace("Z", "+00:00"))
+            end = datetime.fromisoformat(snapshot["endAt"].replace("Z", "+00:00"))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if start <= now_utc <= end:
+            live_version_candidates.append(snapshot["version"])
+    live_version = max(live_version_candidates, key=lambda value: tuple(map(int, value.split(".")))) if live_version_candidates else None
+
     payload = {
         "schemaVersion": 3,
         "generatedAt": datetime.now(timezone.utc).isoformat(),
         "refreshSeconds": 1800,
-        "latestVersion": next((v['version'] for v in versions if v.get('status') == 'OFFICIAL'), versions[0]['version'] if versions else None),
+        "latestVersion": live_version,
         "news": final,
         "versions": versions[:30],
         "banners": banners[:80],

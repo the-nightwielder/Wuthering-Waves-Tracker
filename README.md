@@ -50,7 +50,7 @@ The sources above retain their own content, names, and rights. Links and attribu
 
 Resonator and weapon image URLs are sourced from the [Wuthering Waves Wiki on Fandom](https://wutheringwaves.fandom.com/) when a matching image is available. The feed carries image URLs rather than the image files; the app fetches thumbnails from Fandom at runtime and caches them on the device for the relevant banner period.
 
-The app also includes visual resources in its Android project, including tab backgrounds and launcher artwork. Some may depict Wuthering Waves characters or other game-related material. Wuthering Waves, its characters, logos, and original game artwork belong to their respective rights holders, including Kuro Games. The project’s code terms below do not license that material. Rights holders can contact the maintainer through the [repository issue tracker](https://github.com/the-nightwielder/Wuthering-Waves-Tracker/issues) to raise a concern.
+The app also includes visual resources in its Android project, including tab backgrounds and launcher artwork. Some may depict Wuthering Waves characters or other game-related material. Wuthering Waves, its characters, logos, and original game artwork belong to their respective rights holders, including Kuro Games. The project’s code terms below do not license that material. Rights holders can contact the maintainer through the [repository issue tracker](https://github.com/the-nightwielder/WuWa-Tracker/issues) to raise a concern.
 
 ## Security, privacy, and use at your own risk
 

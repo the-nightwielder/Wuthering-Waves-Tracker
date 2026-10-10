@@ -1,68 +1,60 @@
-# WuWa Tracker v1.3 — free structured intelligence pipeline
+# WuWa Tracker data pipeline
 
-This backend turns public Wuthering Waves information into a normalized `feed.json` consumed by the Android app.
+This pipeline collects public Wuthering Waves news and schedule information, normalizes it, and writes `feed.json` for the Android app. It is an unofficial community project; source content can be incomplete or incorrect.
 
-## No paid X API
+## Sources and labels
 
-v1.3 does **not** require an X/Twitter API token.
+Sources are configured in [`sources.json`](sources.json). The pipeline currently reads public pages and feeds, including Google News RSS search results, Reddit RSS feeds, and public schedule or game-information sites. It does not require an X/Twitter API token and does not bypass site access controls.
 
-X discovery uses public X pages that are indexed by Google News RSS queries. Reddit's public RSS feeds are also used for community/leak discovery. This is intentionally a best-effort free strategy: it cannot guarantee complete coverage of every X post, and it does not bypass X access controls.
+An item is labeled `OFFICIAL` only when the publisher metadata identifies an approved Kuro Games domain or the official Wuthering Waves X account. A source's configured category by itself does not make a result official. Unverified items are treated as community reports; likely leak content is labeled `LEAK` and is not confirmation.
 
-If you later self-host an RSS bridge that legally exposes specific public X feeds, you can add it as another RSS source in `sources.json` without changing the Android app.
+Each remote response is limited to 10 MiB. Source failures are recorded in the generated feed where possible, and one failed source does not prevent other sources from being processed.
 
-## Sources
+## Feed contents
 
-- Official Kuro Games news via Google News RSS indexing
-- WutheringWaves.gg
-- Game8
-- LDShop
-- WuWa Banners live schedule snapshot and GenGamer upcoming countdown snapshot
-- u7buy.com and LDShop leak discovery through Google News indexing
-- GamingOnPhone
-- Public X pages indexed by Google News
-- r/WutheringWavesLeaks RSS
-- r/WutheringWaves RSS
-- Source title and type are retained so the app can identify Website, X, and Reddit reports.
-- Generic homepage navigation and unrelated Reddit megathreads are filtered out.
+The generated `feed.json` uses schema version 3 and includes:
 
-## Structured output
+- `news` — attributed articles and posts
+- `versions`, `banners`, `activeBanners`, and `upcomingBanners` — version and banner information with source evidence
+- `resonators` and `upcomingResonators` — extracted character claims
+- `events` — source-derived event and endgame dates
+- `sourceHealth` and `policy` — source status and interpretation rules
 
-`feed.json` schemaVersion 3 contains:
+Records retain source URLs and confidence information. Multiple sources can strengthen a claim, but community or leak claims are not automatically made official.
 
-- `news[]` — source-attributed articles/posts
-- `versions[]` — version entities and evidence
-- `banners[]`, `activeBanners[]`, `upcomingBanners[]` — banner/phase entities, evidence, and lifecycle buckets
-- `resonators[]`, `upcomingResonators[]` — conservatively extracted Resonator claims
-- `events[]` — source-derived event/endgame date claims
-- `sourceHealth[]` — fetch failures
-- `policy` — explicit rules for confirmation/leaks
+## Run locally
 
-Each structured entity keeps source URLs and confidence. Multiple independent sources can increase confidence, but a leak never becomes official automatically. Official Kuro information remains authoritative.
+Run these commands from the repository root. Python 3.12 is used by the GitHub workflow.
 
-## Local test
-
-```bash
-python -m venv .venv
-# Windows: .venv\\Scripts\\activate
-# Linux/macOS: source .venv/bin/activate
-pip install -r requirements.txt
-python aggregator.py
+```powershell
+py -3.12 -m venv .venv
+.venv\Scripts\Activate.ps1
+python -m pip install --require-hashes -r data-pipeline/requirements.txt
+python -m unittest discover -s tests -v
+python data-pipeline/aggregator.py
 ```
 
-## GitHub deployment
+The aggregator writes `data-pipeline/feed.json`. It makes requests to the configured public sources, so source availability and returned results can vary. The generated feed is intentionally excluded from the copy-to-GitHub script because the workflow generates it before deployment.
 
-The repository workflow runs daily and can also be started manually. It:
+### Update Python dependencies
 
-1. fetches sources;
-2. extracts and correlates entities;
-3. writes `feed.json`;
-4. commits the snapshot;
-5. publishes the same directory to GitHub Pages.
+Declare direct dependency ranges in `requirements.in`; commit both that file and the generated hash-locked `requirements.txt`. To regenerate the lock from the repository root:
 
-GitHub Pages is used as the free HTTPS data endpoint. After the first successful Pages deployment, the Android app can use:
+```powershell
+python -m pip install pip-tools
+python -m piptools compile --generate-hashes --output-file=data-pipeline/requirements.txt --strip-extras data-pipeline/requirements.in
+```
+
+Review the resolved versions before committing. Install the resulting lock with `--require-hashes` as shown above.
+
+## GitHub Actions and Pages
+
+The `WuWa Intelligence Feed` workflow runs daily at 00:00 UTC and can also be started manually from the Actions tab. It installs the hash-locked dependencies, runs the security regression tests, builds the feed, and uploads **only** `feed.json` to GitHub Pages. A separate deployment job publishes that artifact with the Pages permissions it needs. The workflow does not commit the generated feed back to the repository.
+
+After a successful Pages deployment, the Android app can retrieve the feed at:
 
 ```text
 https://<github-user>.github.io/<repository>/feed.json
 ```
 
-Do not put credentials or private data in this repository. The feed is intentionally public.
+Do not commit credentials, signing keys, private data, or local build configuration. The published feed and its source links are public.

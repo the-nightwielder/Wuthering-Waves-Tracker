@@ -15,6 +15,13 @@
       "priority": 100
     },
     {
+      "id": "official-site-feed",
+      "kind": "official_json",
+      "url": "https://hw-media-cdn-mingchao.kurogame.com/akiwebsite/website2.0/json/G152/en/MainMenu.json",
+      "category": "official",
+      "priority": 110
+    },
+    {
       "id": "wwgg",
       "kind": "google_news",
       "query": "site:wutheringwaves.gg Wuthering Waves resonator banner version",

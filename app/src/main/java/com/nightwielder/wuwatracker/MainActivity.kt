@@ -387,12 +387,12 @@ private fun BannerIntel.relevant(version:String,now:Instant):Boolean = if(this.v
 private fun FeedItem.isNextVersionLeak(currentVersion:String):Boolean {
     val text=title+" "+summary
     val versionPattern=Regex("(?i)(?:(?:version|ver\\.?|wuthering\\s+waves|wuwa)\\s*|\\bv\\s*)(\\d+\\.\\d+)")
-    val versions=versionPattern.findAll(text).map{it.groupValues[1]}.toMutableList()
+    val headlineVersions=versionPattern.findAll(title).map{it.groupValues[1]}.toList()
+    val versions=(headlineVersions.ifEmpty{versionPattern.findAll(text).map{it.groupValues[1]}.toList()}).toMutableList()
     if(versions.isEmpty()&&Regex("(?i)wuthering\\s+waves|\\bwuwa\\b").containsMatchIn(text))versions+=Regex("\\b(\\d+\\.\\d+)\\b").findAll(text).map{it.groupValues[1]}.toList()
     val parts=Regex("\\d+\\.\\d+").find(currentVersion)?.value?.split(".")?.mapNotNull{it.toIntOrNull()}?:return false
     val next="${parts.getOrElse(0){0}}.${parts.getOrElse(1){0}+1}"
-    if(targetVersion!=null)return targetVersion==next
-    if(versions.isNotEmpty())return versions.any{compareVersion(it,next)==0}
+    if(versions.isNotEmpty())return versions.any{compareVersion(it,next)>=0}
     return Regex("(?i)\\b(?:next\\s+(?:version|patch|update|resonator)|upcoming\\s+(?:version|resonator|banner)|beta\\s+(?:for|of)\\s+(?:the\\s+)?next\\s+(?:version|patch))\\b").containsMatchIn(text)
 }
 private fun FeedItem.leakDedupKey(currentVersion:String,resonators:List<ResonatorIntel>):String{
@@ -408,8 +408,10 @@ private fun compareVersion(a:String,b:String):Int{val x=Regex("\\d+\\.\\d+").fin
 private fun FeedItem.relevant(version:String,now:Instant):Boolean {
     val mentions=Regex("(?i)(?:(?:version|ver\\.?|wuthering\\s+waves)\\s*|\\bv\\s*)(\\d+\\.\\d+)").findAll(title+" "+summary).map{it.groupValues[1]}.toList()
     val targetIsCurrentOrNewer=targetVersion?.takeIf{Regex("\\d+\\.\\d+").matches(it)}?.let{compareVersion(it,version)>=0}==true
+    val date=runCatching{Instant.parse(publishedAt)}.getOrNull()
+    if(status.equals("OFFICIAL",true))return date!=null&&Duration.between(date,now).abs()<=Duration.ofDays(60)
     if(mentions.any{compareVersion(it,version)<0}&&mentions.none{compareVersion(it,version)>=0}&&!targetIsCurrentOrNewer)return false
-    val date=runCatching{Instant.parse(publishedAt)}.getOrNull()?:return targetIsCurrentOrNewer||mentions.any{compareVersion(it,version)>=0}
+    if(date==null)return targetIsCurrentOrNewer||mentions.any{compareVersion(it,version)>=0}
     return targetIsCurrentOrNewer||mentions.any{compareVersion(it,version)>=0}||Duration.between(date,now).abs()<=Duration.ofDays(60)
 }
 

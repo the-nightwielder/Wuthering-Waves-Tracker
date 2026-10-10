@@ -7,7 +7,7 @@ source-attributed and confidence-scored; leaks never become official automatical
 """
 import hashlib, html, json, os, re
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from urllib.parse import quote_plus, urljoin
@@ -78,6 +78,54 @@ def parse_date(entry):
     return datetime.now(timezone.utc).isoformat()
 
 
+def parse_kuro_datetime(value):
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone(timedelta(hours=8)))
+    return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def official_json_items(source, payload):
+    """Parse recent Kuro MainMenu news JSON into deduplicated, verified items."""
+    seen = set()
+    now = datetime.now(timezone.utc)
+    entries = payload.get("article", []) if isinstance(payload, dict) else []
+    if not isinstance(entries, list):
+        return
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        article_id = str(entry.get("articleId", ""))
+        title = clean_text(entry.get("articleTitle", ""))
+        published = parse_kuro_datetime(entry.get("createTime"))
+        if not article_id.isdigit() or article_id in seen or not title or not published:
+            continue
+        published_at = datetime.fromisoformat(published.replace("Z", "+00:00"))
+        if abs(now - published_at) > timedelta(days=60):
+            continue
+        seen.add(article_id)
+        url = f"https://wutheringwaves.kurogames.com/en/main/news/detail/{article_id}"
+        summary = clean_text(entry.get("articleDesc", ""))
+        item = make_item(source, title, url, summary, published,
+                         "Wuthering Waves Official Website", url)
+        if item:
+            yield item
+        if len(seen) >= 60:
+            break
+
+
+def official_json(source):
+    response, body = bounded_get(source["url"])
+    from urllib.parse import urlsplit
+    if urlsplit(response.url).hostname != "hw-media-cdn-mingchao.kurogame.com":
+        raise ValueError("Official news JSON redirected to an unapproved host")
+    payload = json.loads(body.decode(response.encoding or "utf-8"))
+    yield from official_json_items(source, payload)
+
+
 def status_for(source, title, summary, publisher_url=None):
     text = f"{title} {summary}"
     if is_verified_official_source(source, publisher_url):
@@ -89,9 +137,11 @@ def status_for(source, title, summary, publisher_url=None):
 
 def make_item(source, title, url, summary="", published=None, publisher="", publisher_url=None):
     title, summary = clean_text(title), clean_text(summary)
-    if not title or not url or not WUWA_TERMS.search(f"{title} {summary}"):
+    if not title or not url:
         return None
-    if not GAME_CONTEXT.search(f"{title} {summary}"):
+    if source['kind'] != 'official_json' and not WUWA_TERMS.search(f"{title} {summary}"):
+        return None
+    if source['kind'] != 'official_json' and not GAME_CONTEXT.search(f"{title} {summary}"):
         return None
     if source['kind'] == 'rss' and not REDDIT_TITLE_CONTEXT.search(title):
         return None
@@ -145,6 +195,16 @@ def html_page(source):
         item = make_item(source, title, href)
         if item:
             yield item
+
+
+def target_version_from_article(item, next_version):
+    article_text = f"{item.get('title', '')} {item.get('summary', '')}"
+    headline_versions = [match.group(1) for match in VERSION_RE.finditer(item.get("title", ""))]
+    article_versions = headline_versions or [match.group(1) for match in VERSION_RE.finditer(article_text)]
+    target_parts = tuple(map(int, next_version.split(".")))
+    supported_versions = [value for value in article_versions
+                          if tuple(map(int, value.split("."))) >= target_parts]
+    return max(supported_versions, key=lambda value: tuple(map(int, value.split(".")))) if supported_versions else None
 
 
 def iso_utc(year, month, day, hour=0, minute=0):
@@ -447,7 +507,7 @@ def main():
                         row['snapshotType'] = source.get('snapshotType')
                         snapshots.append(row)
                 continue
-            fn = {'google_news': google_news, 'rss': rss, 'html': html_page}[source['kind']]
+            fn = {'google_news': google_news, 'rss': rss, 'html': html_page, 'official_json': official_json}[source['kind']]
             for item in fn(source):
                 if item: items.append(item)
         except Exception as exc:
@@ -478,7 +538,9 @@ def main():
             try:
                 for item in google_news(targeted):
                     if item:
-                        item["targetVersion"] = next_version
+                        target_version = target_version_from_article(item, next_version)
+                        if target_version:
+                            item["targetVersion"] = target_version
                         items.append(item)
             except Exception as exc:
                 errors.append({"sourceId": source["id"], "error": str(exc)[:300]})

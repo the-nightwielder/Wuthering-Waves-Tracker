@@ -14,3 +14,5 @@ __pycache__/
 keystore.properties
 signing.properties
 key.properties
+app/release/mapping.txt
+app/release/output-metadata.json
